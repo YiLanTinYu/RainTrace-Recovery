@@ -1,0 +1,18 @@
+The Sleuth Kit 4.15.0
+
+Upstream source: https://github.com/sleuthkit/sleuthkit
+Release: https://github.com/sleuthkit/sleuthkit/releases/tag/sleuthkit-4.15.0
+Release source archive: sleuthkit-4.15.0.tar.gz
+Source archive SHA-256: 3a8c1e7d18a9b81f3e5e8aa78313974aceaafc6e051d636bc92cd7168286eca9
+Windows archive: sleuthkit-4.15.0-win32.zip
+Windows archive SHA-256: c2ebab8105b893d97bd8ce35b88e01985e2a106efc97f03adf95840a631b20ce
+
+The complete corresponding source archive is stored in:
+third_party/downloads/sleuthkit-4.15.0.tar.gz
+
+The extracted source is stored in:
+third_party/sleuthkit-4.15.0
+
+See the bundled licenses directory. The Sleuth Kit contains components under
+multiple open-source licenses; the fls/icat file-system tools are distributed
+with the upstream IBM/CPL license notices.

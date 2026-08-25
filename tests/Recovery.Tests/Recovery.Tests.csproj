@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Recovery.Tests</AssemblyName>
+    <RootNamespace>Recovery.Tests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Recovery.Core\Recovery.Core.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,13 @@
+bin/
+obj/
+.vs/
+artifacts/
+*.user
+*.suo
+*.log
+TestResults/
+.dotnet-home/
+.test-output/
+dist/
+recovery-output/
+tools/dotnet8/

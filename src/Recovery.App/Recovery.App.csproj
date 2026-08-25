@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+    <PlatformTarget>x64</PlatformTarget>
+    <ApplicationIcon>Assets\yuhen.ico</ApplicationIcon>
+    <ApplicationManifest Condition="'$(SmokeTestMode)' != 'true'">app.manifest</ApplicationManifest>
+    <ApplicationManifest Condition="'$(SmokeTestMode)' == 'true'">app.smoke.manifest</ApplicationManifest>
+    <AssemblyName>雨痕数据恢复</AssemblyName>
+    <RootNamespace>Recovery.App</RootNamespace>
+    <Version>1.10.1</Version>
+    <DefineConstants Condition="'$(SmokeTestMode)' == 'true'">$(DefineConstants);YUHEN_UI_SMOKE</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Recovery.Core\Recovery.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Resource Include="Assets\yuhen-ui-256.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\..\third_party\runtime\testdisk-7.2\photorec_win.exe" Link="PhotoRec\photorec_win.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\third_party\runtime\testdisk-7.2\cyg*.dll" Link="PhotoRec\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\third_party\runtime\testdisk-7.2\COPYING.txt" Link="PhotoRec\COPYING.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\third_party\runtime\testdisk-7.2\VERSION.txt" Link="PhotoRec\VERSION.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\third_party\runtime\PhotoRec-SOURCE.txt" Link="PhotoRec\SOURCE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\third_party\runtime\testdisk-7.2-source.zip" Link="PhotoRec\testdisk-7.2-source.zip" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\third_party\runtime\sleuthkit-4.15.0\sleuthkit-4.15.0-win32\bin\*" Link="SleuthKit\bin\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\third_party\runtime\sleuthkit-4.15.0\sleuthkit-4.15.0-win32\licenses\*" Link="SleuthKit\licenses\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\third_party\runtime\sleuthkit-4.15.0\sleuthkit-4.15.0-win32\README*.txt" Link="SleuthKit\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\third_party\runtime\SleuthKit-SOURCE.txt" Link="SleuthKit\SOURCE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

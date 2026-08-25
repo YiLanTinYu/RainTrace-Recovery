@@ -1,0 +1,15 @@
+PhotoRec 7.2 corresponding source
+=================================
+
+Upstream project: https://github.com/cgsecurity/testdisk
+Release tag: v7.2
+Commit: 281be432dd79121e08e0898887a9ee1f30fb3e96
+License: GNU GPL version 2 or later
+
+The complete upstream source used by this package is included as:
+  testdisk-7.2-source.zip
+
+Raintrace/Yuhen invokes photorec_win.exe through the process adapter in:
+  src/Recovery.Core/PhotoRecEngine.cs
+
+The application source and modification notes are kept with the Raintrace/Yuhen project.
