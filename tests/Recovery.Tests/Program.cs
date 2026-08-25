@@ -2,6 +2,7 @@ using Recovery.Core;
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 
 namespace Recovery.Tests;
 
@@ -105,8 +106,14 @@ internal static class Program
         }
         if (args.Length > 1 && args[0] == "--readphysical")
         {
-            await using var physical = new WindowsPhysicalDiskDevice(args[1]);
-            var sector = new byte[512];
+            var logicalSectorSize = args.Length > 2
+                ? uint.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture)
+                : 512U;
+            var physicalSectorSize = args.Length > 3
+                ? uint.Parse(args[3], System.Globalization.CultureInfo.InvariantCulture)
+                : Math.Max(logicalSectorSize, 4096U);
+            await using var physical = new WindowsPhysicalDiskDevice(args[1], logicalSectorSize, physicalSectorSize);
+            var sector = new byte[logicalSectorSize];
             await physical.ReadExactlyAsync(0, sector);
             Console.WriteLine($"PATH={args[1]} LENGTH={physical.Length} READ={sector.Length} SIGNATURE={sector[510]:X2}{sector[511]:X2} READONLY={physical.IsReadOnly}");
             var partitions = await PartitionScanner.ScanAsync(physical);
@@ -275,8 +282,8 @@ internal static class Program
         }
         var root = args.Length > 0 ? Path.GetFullPath(args[0]) : @"D:\CodexRecoveryLab";
         var testDrive = Path.GetPathRoot(root);
-        if (testDrive is null || !new[] { @"D:\", @"F:\", @"G:\" }.Contains(testDrive, StringComparer.OrdinalIgnoreCase))
-            throw new InvalidOperationException("Safety rule: the integration test root must be on D:, F: or G:. C: is never accepted.");
+        if (testDrive is null || !new[] { @"D:\", @"E:\", @"G:\" }.Contains(testDrive, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Safety rule: the integration test root must be on D:, E: or G:. C: is never accepted.");
 
         Directory.CreateDirectory(root);
         var imageDir = Path.Combine(root, "images");
@@ -299,6 +306,15 @@ internal static class Program
                 photoRecArguments[^1].Contains("keep_corrupted_file_no", StringComparison.Ordinal) &&
                 photoRecArguments[^1].Contains("freespace", StringComparison.Ordinal), "PhotoRec safe scripted arguments");
             lines.Add("PASS PhotoRec adapter builds strict free-space-only command arguments without shell interpolation");
+
+            TestCapabilityRegistry();
+            lines.Add("PASS capability registry consistently routes every advertised format, preflight support and PhotoRec families without raw text carving");
+
+            await TestRecoveryReportsAsync(outputDir);
+            lines.Add("PASS batch recovery JSON/CSV reports preserve every status, byte count, hash, failure reason and unique output name");
+
+            await TestRecoveryCandidateIndexAsync();
+            lines.Add("PASS exact-content deduplication requires full SHA-256 and keeps filesystem metadata as the preferred recovery source");
 
             var imagePath = Path.Combine(imageDir, "synthetic-ntfs.img");
             await BuildNtfsImageAsync(imagePath);
@@ -335,10 +351,18 @@ internal static class Program
             var photoRecDestination = Path.Combine(outputDir, "photorec-engine-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmssfff"));
             var photoRecResult = await PhotoRecEngine.RunAsync(photoRecExecutable, new PhotoRecRunOptions(
                 imagePath, photoRecDestination, Path.Combine(root, "photorec-work", Guid.NewGuid().ToString("N")),
-                ["jpg", "png", "pdf", "bmp"], FreeSpaceOnly: true, TreatSourceAsWholeDevice: true));
+                ["jpg", "png", "pdf", "bmp"], FreeSpaceOnly: false, TreatSourceAsWholeDevice: true));
             Assert(photoRecResult.CompletedNormally && photoRecResult.Files.Count > 0 && photoRecResult.RejectedFiles > 0,
                 "PhotoRec engine strictly recovers valid files and rejects invalid candidates");
             lines.Add($"PASS PhotoRec 7.2 process integration recovered {photoRecResult.Files.Count} validated files and rejected {photoRecResult.RejectedFiles} invalid candidates from read-only image");
+            var interruptedOutputDirectory = photoRecDestination + ".999999";
+            Directory.CreateDirectory(interruptedOutputDirectory);
+            var interruptedStablePath = Path.Combine(interruptedOutputDirectory, "f-interrupted.png");
+            await File.WriteAllBytesAsync(interruptedStablePath, ValidPngPayload);
+            var rediscoveredStable = await PhotoRecEngine.FindStableExistingOutputsAsync(photoRecDestination);
+            Assert(rediscoveredStable.Any(file => string.Equals(file.Path, interruptedStablePath, StringComparison.OrdinalIgnoreCase)),
+                "stable PhotoRec output left by an interrupted stage is rediscovered before restart");
+            lines.Add("PASS interrupted PhotoRec stable outputs are re-probed and available for resume import");
 
             var stagedPngPath = Path.Combine(outputDir, "photorec-staged-source.png");
             await File.WriteAllBytesAsync(stagedPngPath, ValidPngPayload);
@@ -405,7 +429,6 @@ internal static class Program
                 ["csv"] = Encoding.UTF8.GetBytes("name,age\r\nAlice,30\r\n张三,20\r\n"),
                 ["log"] = Encoding.GetEncoding(54936).GetBytes("2026-08-25 启动扫描\r\n读取介质完成\r\n"),
                 ["ini"] = [.. Encoding.Unicode.GetPreamble(), .. Encoding.Unicode.GetBytes("[RainTrace]\r\nReadOnly=true\r\n")],
-                ["md"] = Encoding.UTF8.GetBytes("# 雨痕\r\n\r\n- 只读扫描\r\n- 数据恢复\r\n"),
                 ["json"] = Encoding.UTF8.GetBytes("{\"name\":\"雨痕\",\"readonly\":true}"),
                 ["xml"] = Encoding.UTF8.GetBytes("<?xml version=\"1.0\" encoding=\"utf-8\"?><root><name>雨痕</name></root>"),
                 ["yaml"] = Encoding.UTF8.GetBytes("name: 雨痕\nreadonly: true\n"),
@@ -435,7 +458,7 @@ internal static class Program
                 Assert((await FileIntegrityValidator.ValidateCandidateAsync(fixtureSource, fixtureCandidate)).State == FileIntegrityState.Valid,
                     $"valid {fixture.Key} text preflight");
             }
-            lines.Add("PASS TXT/CSV/LOG/INI/MD/JSON/XML/YAML text preflight handles UTF-8, UTF-16 and GB18030 and rejects binary or malformed structured text");
+            lines.Add("PASS TXT/CSV/LOG/INI/JSON/XML/YAML text preflight handles UTF-8, UTF-16 and GB18030 and rejects binary or malformed structured text");
 
             var damagedJpegPath = Path.Combine(imageDir, "damaged-jpeg-overwritten-header.jpg");
             var damagedJpeg = BuildSalvageableJpeg(512, 555, 985);
@@ -464,6 +487,12 @@ internal static class Program
             Assert(partitions.Count == 1 && partitions[0].FileSystem == FileSystemKind.Ntfs, "whole-device NTFS detection");
             lines.Add("PASS partition and NTFS detection");
 
+            await TestScanCheckpointV3Async(imagePath, outputDir, partitions);
+            lines.Add("PASS checkpoint v3 atomic roundtrip, v2 migration, save throttle, byte/stage resume semantics and same-model multipoint source rejection");
+
+            await TestEbrPartitionChainsAsync(imageDir);
+            lines.Add("PASS two-level EBR discovery terminates safely on loops and rejects overlapping or out-of-range logical partitions");
+
             var backupGptPath = Path.Combine(imageDir, "synthetic-backup-gpt.img");
             await BuildBackupGptImageAsync(backupGptPath, await File.ReadAllBytesAsync(imagePath));
             await using (var backupGptImage = new ImageBlockDevice(backupGptPath))
@@ -475,6 +504,23 @@ internal static class Program
                     "invalid primary GPT falls back to the CRC-valid backup GPT");
             }
             lines.Add("PASS damaged primary GPT automatically falls back to the backup header and entry table");
+
+            var backupGptWithoutProtectiveMbrPath = Path.Combine(imageDir, "synthetic-backup-gpt-no-sector0.img");
+            File.Copy(backupGptPath, backupGptWithoutProtectiveMbrPath, overwrite: true);
+            await using (var stream = new FileStream(
+                backupGptWithoutProtectiveMbrPath, FileMode.Open, FileAccess.Write, FileShare.None))
+            {
+                await stream.WriteAsync(new byte[SectorSize]);
+            }
+            await using (var backupGptWithoutProtectiveMbr = new ImageBlockDevice(backupGptWithoutProtectiveMbrPath))
+            {
+                var recoveredPartitions = await PartitionScanner.ScanAsync(backupGptWithoutProtectiveMbr);
+                Assert(recoveredPartitions.Count == 1 && recoveredPartitions[0].IsGpt &&
+                       recoveredPartitions[0].Offset == 2048UL * SectorSize &&
+                       recoveredPartitions[0].Name.Contains("GPT备份表", StringComparison.Ordinal),
+                    "backup GPT remains discoverable after sector 0 and the protective MBR are erased");
+            }
+            lines.Add("PASS erased sector 0/protective MBR still discovers the CRC-valid backup GPT");
 
             await using (var pausable = new PausableBlockDevice(new ImageBlockDevice(imagePath)))
             {
@@ -525,6 +571,10 @@ internal static class Program
             await using (var ntfsBackupImage = new ImageBlockDevice(ntfsBackupBootPath))
             {
                 var known = await PartitionScanner.ScanAsync(ntfsBackupImage);
+                var enriched = await PartitionScanner.EnrichWithBackupStructuresAsync(ntfsBackupImage, known);
+                Assert(enriched.Single().FileSystem == FileSystemKind.Ntfs &&
+                       enriched.Single().BootSectorOffset == (ulong)(ntfsBackupBytes.Length - SectorSize),
+                    "table-listed NTFS range is routed through its backup boot sector");
                 var recovered = await PartitionScanner.FindLostPartitionsAsync(ntfsBackupImage, known);
                 var recoveredPartition = recovered.Single(item => item.FileSystem == FileSystemKind.Ntfs);
                 Assert(recoveredPartition.Offset == 0 && recoveredPartition.BootSectorOffset == (ulong)(ntfsBackupBytes.Length - SectorSize),
@@ -534,6 +584,9 @@ internal static class Program
                 Assert(recoveredScan.Candidates.Any(item => item.Name == "deleted-note.txt"), "NTFS metadata scan works through the backup boot sector");
             }
             lines.Add("PASS damaged NTFS primary boot sector is located and scanned through the end-of-volume backup boot sector");
+
+            await TestNtfsMftMirrorFallbackAsync(imagePath, imageDir);
+            lines.Add("PASS damaged NTFS $MFT record 0 falls back read-only to $MFTMirr and continues current-MFT recovery");
 
             Assert(scan.Candidates.All(c => c.Name != "原始报告.docx"), "ordinary MFT scan must not see stale records beyond valid length");
             var deepScan = await new NtfsScanner(image, 0).ScanAsync(new ScanOptions(DeepMetadataScan: true, DeepMetadataBytes: 512 * 1024));
@@ -657,6 +710,10 @@ internal static class Program
             await using (var exFatBackupImage = new ImageBlockDevice(exFatBackupBootPath))
             {
                 var known = await PartitionScanner.ScanAsync(exFatBackupImage);
+                var enriched = await PartitionScanner.EnrichWithBackupStructuresAsync(exFatBackupImage, known);
+                Assert(enriched.Single().FileSystem == FileSystemKind.ExFat &&
+                       enriched.Single().BootSectorOffset == 12UL * SectorSize,
+                    "table-listed exFAT range is routed through its backup boot region");
                 var recovered = await PartitionScanner.FindLostPartitionsAsync(exFatBackupImage, known);
                 var recoveredPartition = recovered.Single(item => item.FileSystem == FileSystemKind.ExFat);
                 Assert(recoveredPartition.Offset == 0 && recoveredPartition.BootSectorOffset == 12UL * SectorSize,
@@ -695,6 +752,12 @@ internal static class Program
             Assert((await File.ReadAllBytesAsync(fat32Recovery.OutputPath)).SequenceEqual(fat32Payload), "FAT32 recovery bytes");
             lines.Add("PASS FAT32 deleted Unicode LFN/path, cleared-chain inference, preview and recovery");
 
+            await TestFat32BackupAndSecondFatAsync(imageDir, outputDir);
+            lines.Add("PASS FAT32 scanner uses the backup boot sector and independently falls back from invalid FAT1 to valid FAT2");
+
+            await TestQuickFormatRecoveryScenariosAsync(imageDir, outputDir);
+            lines.Add("PASS NTFS/exFAT/FAT32 quick-format fixtures recover original names only from surviving metadata and use a temporary RAW name when FAT32 metadata is no longer reachable");
+
             var lostPartitionImagePath = Path.Combine(imageDir, "synthetic-lost-partition.img");
             var lostDisk = new byte[10 * 1024 * 1024];
             (await File.ReadAllBytesAsync(fat32ImagePath)).CopyTo(lostDisk, 1024 * 1024);
@@ -706,13 +769,38 @@ internal static class Program
                 "lost FAT32 boot-sector discovery");
             lines.Add("PASS lost partition discovery by validated FAT32 boot sector");
 
-            var clonePath = Path.Combine(imageDir, "synthetic-ntfs-clone.img");
+            var noisePath = Path.Combine(imageDir, "synthetic-partition-noise.img");
+            var noise = new byte[4 * 1024 * 1024];
+            new Random(20260825).NextBytes(noise);
+            for (var sectorOffset = 0; sectorOffset + SectorSize <= noise.Length; sectorOffset += SectorSize)
+            {
+                noise.AsSpan(sectorOffset + 3, 8).Clear();
+                noise.AsSpan(sectorOffset + 82, 8).Clear();
+                noise[sectorOffset + 510] = 0;
+                noise[sectorOffset + 511] = 0;
+            }
+            await File.WriteAllBytesAsync(noisePath, noise);
+            await using (var noiseDevice = new ImageBlockDevice(noisePath))
+            {
+                var noiseKnown = await PartitionScanner.ScanAsync(noiseDevice);
+                var noiseLost = await PartitionScanner.FindLostPartitionsAsync(noiseDevice, noiseKnown);
+                Assert(noiseKnown.Count == 1 && noiseKnown[0].FileSystem == FileSystemKind.Unknown && noiseLost.Count == 0,
+                    "random noise does not manufacture GPT, MBR or lost filesystem candidates");
+            }
+            lines.Add("PASS random noise does not produce a false partition candidate");
+
+            var basicImagingDirectory = Path.Combine(imageDir, "basic-imaging-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(basicImagingDirectory);
+            var clonePath = Path.Combine(basicImagingDirectory, "synthetic-ntfs-clone.img");
             var imaging = await new DiskImager(image).CreateImageAsync(clonePath);
             Assert(imaging.Complete && imaging.ReadErrors == 0, "disk imaging completion");
             Assert(imaging.Sha256 == await FileSha256Async(imagePath), "disk image checksum");
             var resumedImaging = await new DiskImager(image).CreateImageAsync(clonePath);
             Assert(resumedImaging.Complete && resumedImaging.Sha256 == imaging.Sha256, "disk imaging checkpoint resume");
             lines.Add("PASS read-only disk imaging, checkpoint resume and SHA-256");
+
+            await TestConservativeImagingAsync(imageDir);
+            lines.Add("PASS conservative imaging isolates one unreadable 512-byte sector, writes an atomic bad map and resumes a cancelled image without losing state");
 
             await TestLargeDiskMathAsync();
             lines.Add("PASS 16 TiB-class GPT and 64-bit offset arithmetic");
@@ -732,6 +820,662 @@ internal static class Program
         }
     }
 
+    private static void TestCapabilityRegistry()
+    {
+        var advertised = RecoveryCapabilityRegistry.All;
+        Assert(advertised.Count > 0 && advertised.Select(item => item.Extension)
+            .Distinct(StringComparer.OrdinalIgnoreCase).Count() == advertised.Count, "capability extensions are unique");
+
+        foreach (var capability in advertised)
+        {
+            Assert(RecoveryCapabilityRegistry.TryGet('.' + capability.Extension.ToUpperInvariant(), out var routed) &&
+                   routed == capability, $"registry lookup {capability.Extension}");
+            Assert(RecoveryCapabilityRegistry.GetCategory(capability.Extension) == capability.Category,
+                $"registry category {capability.Extension}");
+            Assert(RecoveryCapabilityRegistry.SupportsPreflight(capability.Extension) == capability.SupportsPreflight &&
+                   FileIntegrityValidator.SupportsSampleValidation(capability.Extension) == capability.SupportsPreflight,
+                $"registry preflight {capability.Extension}");
+            Assert(RecoveryCapabilityRegistry.SupportsImagePreview(capability.Extension) == capability.SupportsImagePreview,
+                $"registry preview {capability.Extension}");
+
+            var families = RecoveryCapabilityRegistry.GetPhotoRecFamilies([capability.Extension]);
+            if (capability.SupportsPhotoRec)
+            {
+                Assert(families.Count == 1 && string.Equals(families[0], capability.PhotoRecFamily, StringComparison.OrdinalIgnoreCase) &&
+                       RecoveryCapabilityRegistry.IsPhotoRecFamilyAllowed(families[0]),
+                    $"registry PhotoRec route {capability.Extension}");
+            }
+            else
+            {
+                Assert(families.Count == 0, $"unsupported PhotoRec route remains disabled for {capability.Extension}");
+            }
+
+            if (capability.IsText)
+            {
+                Assert(capability.Category == RecoveryFileCategory.Document && capability.SupportsPreflight &&
+                       !capability.SupportsPhotoRec && capability.PhotoRecFamily is null,
+                    $"text remains metadata-only {capability.Extension}");
+            }
+        }
+
+        var defaults = RecoveryCapabilityRegistry.DefaultPhotoRecFamilies.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert(defaults.SetEquals(["jpg", "png", "bmp", "gif", "tif", "pdf", "doc", "zip"]),
+            "PhotoRec defaults are only common pictures and documents");
+        Assert(RecoveryCapabilityRegistry.All.Where(item => item.IsText)
+            .All(item => !defaults.Contains(item.Extension) && !RecoveryCapabilityRegistry.SupportsPhotoRec(item.Extension)),
+            "no text family is advertised for PhotoRec");
+
+        var rejectedText = false;
+        try
+        {
+            _ = PhotoRecEngine.BuildArguments(new PhotoRecRunOptions(
+                "synthetic.img", "photorec-out", "photorec-work", ["txt"], TreatSourceAsWholeDevice: true));
+        }
+        catch (ArgumentException)
+        {
+            rejectedText = true;
+        }
+        Assert(rejectedText, "PhotoRec command builder rejects text carving");
+    }
+
+    private static async Task TestRecoveryReportsAsync(string outputDir)
+    {
+        var now = new DateTime(2026, 8, 25, 1, 2, 3, DateTimeKind.Utc);
+        var hash = new string('a', 64);
+        var items = new[]
+        {
+            new RecoveryItemReport("相册\\照片,一.jpg", RecoveryItemStatus.Success, "D:\\恢复\\照片一.jpg", 1024, hash, "结构完整", now),
+            new RecoveryItemReport("文档\\部分.docx", RecoveryItemStatus.Partial, "D:\\恢复\\部分.docx", 512, null, "只写出部分字节", now.AddSeconds(1)),
+            new RecoveryItemReport("归档\\损坏.zip", RecoveryItemStatus.Damaged, "D:\\恢复\\损坏.zip", 2048, new string('b', 64), "中央目录损坏", now.AddSeconds(2)),
+            new RecoveryItemReport("失败.pdf", RecoveryItemStatus.Failed, null, 0, null, "源介质读取失败，\"保留后续队列\"", now.AddSeconds(3)),
+            new RecoveryItemReport("取消.mp4", RecoveryItemStatus.Cancelled, null, 0, null, "用户取消", now.AddSeconds(4)),
+            new RecoveryItemReport("目录节点", RecoveryItemStatus.Skipped, null, 0, null, "目录不进入恢复队列", now.AddSeconds(5))
+        };
+        var report = new RecoveryBatchReport(1, now, now.AddMinutes(1), "synthetic-source", outputDir, items);
+        Assert(report.Successful == 1 && report.PartialOrDamaged == 2 && report.Failed == 1 && report.CancelledOrSkipped == 2,
+            "report summary counts");
+
+        var reportDir = Path.Combine(outputDir, "reports");
+        var first = await RecoveryReportWriter.SaveAsync(report, reportDir);
+        var second = await RecoveryReportWriter.SaveAsync(report, reportDir);
+        Assert(File.Exists(first.JsonPath) && File.Exists(first.CsvPath) &&
+               !string.Equals(first.JsonPath, second.JsonPath, StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(first.CsvPath, second.CsvPath, StringComparison.OrdinalIgnoreCase),
+            "report files are persisted without overwrite");
+        var roundTrip = JsonSerializer.Deserialize<RecoveryBatchReport>(await File.ReadAllTextAsync(first.JsonPath));
+        Assert(roundTrip is not null && roundTrip.Items.Count == items.Length && roundTrip.Items[0].Sha256 == hash &&
+               roundTrip.Items.Select(item => item.Status).SequenceEqual(items.Select(item => item.Status)),
+            "JSON report roundtrip");
+        var csv = await File.ReadAllTextAsync(first.CsvPath);
+        Assert(csv.Contains("成功", StringComparison.Ordinal) && csv.Contains("部分写出", StringComparison.Ordinal) &&
+               csv.Contains("结构损坏", StringComparison.Ordinal) && csv.Contains("失败", StringComparison.Ordinal) &&
+               csv.Contains("已取消", StringComparison.Ordinal) && csv.Contains("已跳过", StringComparison.Ordinal) &&
+               csv.Contains("\"相册\\照片,一.jpg\"", StringComparison.Ordinal) &&
+                csv.Contains("\"\"保留后续队列\"\"", StringComparison.Ordinal),
+            "CSV report labels and escaping");
+
+        var executed = new List<int>();
+        var tolerantQueue = await RecoveryBatchExecutor.ExecuteAsync(
+            new[] { 1, 2, 3 },
+            (item, _, _, _) =>
+            {
+                executed.Add(item);
+                if (item == 2) throw new InvalidDataException("故意损坏的中间文件");
+                return Task.FromResult(new RecoveryItemReport($"{item}.bin", RecoveryItemStatus.Success,
+                    Path.Combine(outputDir, $"{item}.bin"), (ulong)item, new string((char)('a' + item), 64),
+                    "恢复成功", DateTime.UtcNow));
+            },
+            item => $"{item}.bin",
+            exception => exception is DriveNotFoundException);
+        Assert(executed.SequenceEqual([1, 2, 3]) && tolerantQueue.SystemicFailure is null &&
+               tolerantQueue.Items.Select(item => item.Status).SequenceEqual([
+                   RecoveryItemStatus.Success, RecoveryItemStatus.Failed, RecoveryItemStatus.Success]),
+            "mixed recovery queue continues after one damaged file and reports every item accurately");
+    }
+
+    private static async Task TestRecoveryCandidateIndexAsync()
+    {
+        var metadata = new RecoveryCandidate
+        {
+            RecordNumber = 10, Name = "照片.jpg", OriginalPath = Path.Combine("原目录", "照片.jpg"), Size = 100,
+            IsDeleted = true, FileSystem = FileSystemKind.Ntfs, Discovery = RecoveryDiscovery.NtfsCurrentMft,
+            Quality = RecoveryQuality.Good, Integrity = FileIntegrityState.Valid, SourceOffset = 4096
+        };
+        var rawDuplicate = new RecoveryCandidate
+        {
+            RecordNumber = 20, Name = "carved-a.jpg", OriginalPath = Path.Combine("内容扫描", "jpg", "carved-a.jpg"), Size = 100,
+            IsDeleted = true, Discovery = RecoveryDiscovery.FileSignature, Quality = RecoveryQuality.Good,
+            Integrity = FileIntegrityState.Valid, SourceOffset = 8192
+        };
+        var rawDifferent = new RecoveryCandidate
+        {
+            RecordNumber = 30, Name = "carved-b.jpg", OriginalPath = Path.Combine("内容扫描", "jpg", "carved-b.jpg"), Size = 100,
+            IsDeleted = true, Discovery = RecoveryDiscovery.PhotoRecFile, Quality = RecoveryQuality.Good,
+            Integrity = FileIntegrityState.Valid, SourceOffset = 12288
+        };
+        var directory = new RecoveryCandidate
+        {
+            RecordNumber = 40, Name = "原目录", OriginalPath = "原目录", IsDirectory = true,
+            FileSystem = FileSystemKind.Ntfs, Discovery = RecoveryDiscovery.NtfsCurrentMft
+        };
+        var hashA = new string('a', 64);
+        var hashB = new string('b', 64);
+        var index = new RecoveryCandidateIndex(
+            (candidate, _) => ValueTask.FromResult<string?>(ReferenceEquals(candidate, rawDifferent) ? hashB : hashA),
+            _ => "same-quick-fingerprint");
+        var result = await index.BuildAsync([rawDifferent, directory, rawDuplicate, metadata]);
+
+        Assert(result.InputCandidates == 4 && result.PreferredCandidates == 3 && result.MergedCandidates == 1 &&
+               result.HashedCandidates == 3, "candidate index statistics");
+        var merged = result.Entries.Single(entry => string.Equals(entry.Sha256, hashA, StringComparison.Ordinal));
+        Assert(ReferenceEquals(merged.PreferredCandidate, metadata) && merged.IsMerged && merged.RecoverySources.Count == 2 &&
+               merged.RecoverySources.Any(candidate => ReferenceEquals(candidate, rawDuplicate)) &&
+               metadata.AlternateCandidates.Any(candidate => ReferenceEquals(candidate, rawDuplicate)),
+            "metadata candidate is preferred while RAW source is retained");
+        Assert(result.Entries.Count(entry => entry.Sha256 is not null) == 2 &&
+               result.Entries.Single(entry => string.Equals(entry.Sha256, hashB, StringComparison.Ordinal)).RecoverySources.Count == 1,
+            "quick fingerprint alone never merges different full hashes");
+        Assert(result.Entries.Any(entry => ReferenceEquals(entry.PreferredCandidate, directory) && !entry.IsMerged),
+            "directory nodes remain standalone");
+    }
+
+    private static async Task TestScanCheckpointV3Async(
+        string imagePath,
+        string outputDir,
+        IReadOnlyList<PartitionDescriptor> partitions)
+    {
+        var descriptor = new MediaDescriptor(
+            "checkpoint-source", "Synthetic checkpoint source", imagePath,
+            checked((ulong)new FileInfo(imagePath).Length), 512, 4096, MediaKind.Image,
+            false, true, "Synthetic Model", "SAME-MODEL-001", MediaCategory.Image);
+        MultiPointMediaFingerprint fingerprint;
+        MediaFingerprint legacyFingerprint;
+        await using (var source = new ImageBlockDevice(imagePath))
+        {
+            fingerprint = await MultiPointMediaFingerprintService.ComputeAsync(source);
+            legacyFingerprint = await MediaFingerprintService.ComputeAsync(source, descriptor);
+        }
+        Assert(fingerprint.Strength == MediaFingerprintStrength.MultiPoint && fingerprint.Points.Count >= 3,
+            "multipoint fingerprint has several independent samples");
+        var identity = ScanSourceIdentity.Capture(descriptor, partitions, fingerprint);
+        var target = new ScanTarget(
+            "target-ntfs", partitions[0].Offset, partitions[0].Length, partitions[0].FileSystem,
+            "当前 NTFS 分区", RecoveryConfidence.High,
+            new PartitionEvidence(ScanTargetOrigin.PrimaryBootSector, true, true, true, false, "主引导与文件系统结构有效。"),
+            partitions[0].Number, partitions[0].BootSectorOffset);
+        var formattedPlan = RecoveryPlanFactory.Create(RecoveryScenario.FormattedOrRaw, ["Image", "Document"]);
+        var plannedTsk = formattedPlan.Stages.Single(stage => stage.Kind == RecoveryStageKind.FileSystemMetadata);
+        var plannedNative = formattedPlan.Stages.Single(stage => stage.Kind == RecoveryStageKind.DeepMetadata);
+        var plannedStages = formattedPlan.Stages.ToArray();
+        Assert(plannedTsk.UsesExternalEngine && !plannedNative.UsesExternalEngine &&
+               Array.IndexOf(plannedStages, plannedTsk) < Array.IndexOf(plannedStages, plannedNative),
+            "real formatted/RAW plan checkpoints TSK before a separate byte-resumable native stage");
+        var savedAt = new DateTime(2026, 8, 25, 2, 0, 0, DateTimeKind.Utc);
+        var stages = new[]
+        {
+            new ScanStageCheckpoint("native", RecoveryStageKind.DeepMetadata, "原生深扫",
+                ScanCheckpointResumeMode.BytePosition, ScanCheckpointStageState.Running, 262144, 1048576, 17, savedAt,
+                CurrentTargetId: target.Id,
+                TargetBytePositions: new Dictionary<string, ulong>(StringComparer.Ordinal)
+                {
+                    [target.Id] = 262144
+                }),
+            new ScanStageCheckpoint("tsk", RecoveryStageKind.FileSystemMetadata, "TSK 元数据",
+                ScanCheckpointResumeMode.StageBoundary, ScanCheckpointStageState.Completed, 0, null, 12, savedAt),
+            new ScanStageCheckpoint("photorec", RecoveryStageKind.RawContent, "PhotoRec",
+                ScanCheckpointResumeMode.StageBoundary, ScanCheckpointStageState.Interrupted, 987654, null, 9, savedAt,
+                Path.Combine(outputDir, "photorec-stage"))
+        };
+        var working = Path.GetFullPath(Path.Combine(outputDir, "checkpoint-v3"));
+        var checkpoint = new ScanCheckpointV3
+        {
+            SavedUtc = savedAt,
+            Source = identity,
+            Scenario = RecoveryScenario.FormattedOrRaw,
+            ScanTargets = [target],
+            Stages = stages,
+            CurrentStageId = "native",
+            CurrentBytePosition = 262144,
+            CandidateIndex = new ScanCandidateIndexCheckpoint(17, 17,
+                Path.Combine(working, "candidates.json"), new string('c', 64),
+                [Path.Combine(working, "photorec-stage", "recup_dir.1", "f0001.jpg")]),
+            RecoveryWorkingDirectory = working,
+            ExecutionOptions = new RecoveryCheckpointOptions(true, true, true, true, true, false,
+                true, true, ["Image", "Document", "Audio", "Video", "Archive"])
+        };
+        var checkpointPath = Path.Combine(working, "roundtrip.json");
+        await ScanCheckpointStore.SaveAsync(checkpointPath, checkpoint);
+        var loaded = await ScanCheckpointStore.LoadDetailedAsync(checkpointPath);
+        Assert(loaded.LoadedVersion == 3 && !loaded.WasMigrated && loaded.Checkpoint.Scenario == checkpoint.Scenario &&
+               loaded.Checkpoint.ScanTargets.Single() == target && loaded.Checkpoint.Stages.Count == 3 &&
+               loaded.Checkpoint.ExecutionOptions?.FullDiskOldMftScan == true &&
+               loaded.Checkpoint.ExecutionOptions.PhotoRecAudioVideo && loaded.Checkpoint.ExecutionOptions.PhotoRecArchives &&
+               loaded.Checkpoint.ExecutionOptions.FileCategoryKeys.Contains("Archive", StringComparer.Ordinal) &&
+               loaded.Checkpoint.CandidateIndex.StableExternalArtifacts.SequenceEqual(checkpoint.CandidateIndex.StableExternalArtifacts),
+            "checkpoint v3 roundtrip");
+        var loadedNative = loaded.Checkpoint.Stages.Single(stage => stage.StageId == "native");
+        Assert(loadedNative.CurrentTargetId == target.Id &&
+               loadedNative.TargetBytePositions is not null &&
+               loadedNative.TargetBytePositions.TryGetValue(target.Id, out var targetBytePosition) &&
+               targetBytePosition == 262144 &&
+               loadedNative.ResumeBytePositionFor(target.Id) == 262144 &&
+               loadedNative.ResumeBytePositionFor("missing-target") == 0,
+            "checkpoint v3 per-target byte positions roundtrip");
+
+        var resumed = loaded.Checkpoint.PrepareForResume(savedAt.AddMinutes(1));
+        var native = resumed.Stages.Single(stage => stage.StageId == "native");
+        var tsk = resumed.Stages.Single(stage => stage.StageId == "tsk");
+        var photoRec = resumed.Stages.Single(stage => stage.StageId == "photorec");
+        Assert(native.State == ScanCheckpointStageState.Pending && native.BytePosition == 262144 &&
+               native.CurrentTargetId == target.Id && native.ResumeBytePositionFor(target.Id) == 262144 &&
+               resumed.CurrentBytePosition == 262144, "native checkpoint resumes at byte position");
+        Assert(tsk.State == ScanCheckpointStageState.Completed, "completed external stage is not repeated");
+        Assert(photoRec.State == ScanCheckpointStageState.Pending && photoRec.BytePosition == 0 && photoRec.MustRestartStage,
+            "interrupted external stage restarts at its boundary");
+        var externalResume = (loaded.Checkpoint with { CurrentStageId = "photorec", CurrentBytePosition = 987654 }).PrepareForResume();
+        Assert(externalResume.CurrentBytePosition == 0, "external current stage never pretends byte-level continuation");
+
+        var clock = new ManualTimeProvider(new DateTimeOffset(savedAt));
+        var throttle = new ScanCheckpointThrottle(TimeSpan.FromSeconds(5), clock);
+        Assert(throttle.GetSaveReason("native") == ScanCheckpointSaveReason.FirstSave, "checkpoint first save is due");
+        throttle.MarkSaved("native");
+        Assert(throttle.GetSaveReason("native") == ScanCheckpointSaveReason.None, "checkpoint is throttled before five seconds");
+        Assert(throttle.GetSaveReason("photorec") == ScanCheckpointSaveReason.StageTransition,
+            "stage transition bypasses time throttle");
+        throttle.MarkSaved("photorec");
+        clock.Advance(TimeSpan.FromSeconds(5));
+        Assert(throttle.GetSaveReason("photorec") == ScanCheckpointSaveReason.IntervalElapsed &&
+               throttle.GetSaveReason("photorec", force: true) == ScanCheckpointSaveReason.Forced,
+            "checkpoint is due at interval and on force");
+
+        var validation = ScanCheckpointSourceValidator.Validate(loaded.Checkpoint, descriptor, partitions, fingerprint);
+        Assert(validation.IsMatch && validation.Errors.Count == 0, "same source validates for checkpoint resume");
+        var changedPath = Path.Combine(outputDir, "checkpoint-same-model-different-media.img");
+        File.Copy(imagePath, changedPath, true);
+        var changedPoint = fingerprint.Points.First(point => point.Offset > 0 && point.Offset + (ulong)point.Length < descriptor.Length);
+        await using (var changed = new FileStream(changedPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            changed.Position = checked((long)changedPoint.Offset);
+            var value = changed.ReadByte();
+            changed.Position = checked((long)changedPoint.Offset);
+            changed.WriteByte(checked((byte)(value ^ 0x5A)));
+        }
+        MultiPointMediaFingerprint changedFingerprint;
+        await using (var changedSource = new ImageBlockDevice(changedPath))
+            changedFingerprint = await MultiPointMediaFingerprintService.ComputeAsync(changedSource);
+        var sameModelDescriptor = descriptor with
+        {
+            Id = "different-device-number",
+            DisplayName = "Same model, different medium",
+            Path = changedPath
+        };
+        var mismatch = ScanCheckpointSourceValidator.Validate(loaded.Checkpoint, sameModelDescriptor, partitions, changedFingerprint);
+        Assert(!mismatch.IsMatch && mismatch.Errors.Any(error => error.Contains("指纹", StringComparison.Ordinal)),
+            "same model, serial, size and layout but different multipoint content is rejected");
+
+        var v2Path = Path.Combine(working, "legacy-v2.json");
+        var legacy = new
+        {
+            Version = 2,
+            SavedUtc = savedAt,
+            Source = descriptor,
+            Candidates = new[] { new { OriginalPath = "旧结果.jpg" } },
+            SourceFingerprint = legacyFingerprint,
+            RecoveryWorkingDirectory = working,
+            Scenario = RecoveryScenario.DeletedFiles
+        };
+        await File.WriteAllTextAsync(v2Path, JsonSerializer.Serialize(legacy));
+        var migrated = await ScanCheckpointStore.LoadDetailedAsync(v2Path);
+        Assert(migrated.LoadedVersion == 2 && migrated.WasMigrated && migrated.Checkpoint.Version == 3 &&
+               migrated.Checkpoint.MigratedFromVersion == 2 && migrated.Checkpoint.CandidateIndex.CandidateCount == 1 &&
+               migrated.Checkpoint.Source.ContentFingerprint.Strength == MediaFingerprintStrength.LegacySinglePoint,
+            "v2 checkpoint safely migrates to v3");
+        var legacyValidation = ScanCheckpointSourceValidator.Validate(migrated.Checkpoint, descriptor, [], fingerprint);
+        Assert(!legacyValidation.IsMatch && legacyValidation.Errors.Any(error => error.Contains("单点指纹", StringComparison.Ordinal)),
+            "v2 single-point fingerprint is not silently trusted for resume");
+    }
+
+    private static async Task TestEbrPartitionChainsAsync(string imageDir)
+    {
+        var loopPath = Path.Combine(imageDir, "synthetic-ebr-two-level-loop.img");
+        await File.WriteAllBytesAsync(loopPath, BuildEbrDisk(firstLogicalSectors: 1000, nextEbrRelative: 3000,
+            secondLogicalSectors: 1000, secondNextEbrRelative: 3000));
+        await using (var device = new ImageBlockDevice(loopPath))
+        {
+            var partitions = await PartitionScanner.ScanAsync(device);
+            Assert(partitions.Count == 2 && partitions.All(partition => !partition.IsGpt) &&
+                   partitions[0].Offset == (2048UL + 63) * SectorSize &&
+                   partitions[1].Offset == (2048UL + 3000 + 63) * SectorSize,
+                "two logical partitions are discovered before self-loop termination");
+            Assert(partitions[0].Offset + partitions[0].Length <= partitions[1].Offset,
+                "accepted EBR logical partitions never overlap");
+        }
+
+        var overlapPath = Path.Combine(imageDir, "synthetic-ebr-overlap.img");
+        await File.WriteAllBytesAsync(overlapPath, BuildEbrDisk(firstLogicalSectors: 4000, nextEbrRelative: 2000,
+            secondLogicalSectors: 1000, secondNextEbrRelative: 0));
+        await using (var device = new ImageBlockDevice(overlapPath))
+        {
+            var partitions = await PartitionScanner.ScanAsync(device);
+            Assert(partitions.Count == 1 && partitions[0].Offset == (2048UL + 63) * SectorSize,
+                "EBR stored inside an accepted logical partition is rejected as overlap");
+        }
+
+        var outOfRangePath = Path.Combine(imageDir, "synthetic-ebr-out-of-range.img");
+        await File.WriteAllBytesAsync(outOfRangePath, BuildEbrDisk(firstLogicalSectors: 1000, nextEbrRelative: 25000,
+            secondLogicalSectors: 0, secondNextEbrRelative: 0));
+        await using (var device = new ImageBlockDevice(outOfRangePath))
+        {
+            var partitions = await PartitionScanner.ScanAsync(device);
+            Assert(partitions.Count == 1 && partitions[0].Length == 1000UL * SectorSize,
+                "out-of-range EBR link is ignored without manufacturing a partition");
+        }
+    }
+
+    private static async Task TestNtfsMftMirrorFallbackAsync(string sourcePath, string imageDir)
+    {
+        var mirrorPath = Path.Combine(imageDir, "synthetic-ntfs-mftmirr.img");
+        var bytes = await File.ReadAllBytesAsync(sourcePath);
+        Array.Copy(bytes, 4 * ClusterSize, bytes, 2 * ClusterSize, RecordSize);
+        bytes.AsSpan(4 * ClusterSize, 4).Clear();
+        await File.WriteAllBytesAsync(mirrorPath, bytes);
+        var progressItems = new List<ScanProgress>();
+        await using var image = new ImageBlockDevice(mirrorPath);
+        var scan = await new NtfsScanner(image, 0, new InlineProgress<ScanProgress>(progressItems.Add))
+            .ScanAsync(new ScanOptions());
+        Assert(scan.Candidates.Any(candidate => candidate.Name == "deleted-note.txt") &&
+               scan.Candidates.Any(candidate => candidate.Name == "deleted-photo.jpg"),
+            "$MFTMirr runlist locates the surviving current MFT");
+        Assert(progressItems.Any(item => item.Stage.Contains("镜像", StringComparison.Ordinal) ||
+                                         item.Message.Contains("$MFTMirr", StringComparison.Ordinal)),
+            "$MFTMirr fallback is reported honestly");
+    }
+
+    private static async Task TestFat32BackupAndSecondFatAsync(string imageDir, string outputDir)
+    {
+        var path = Path.Combine(imageDir, "synthetic-fat32-two-fat.img");
+        var payload = Enumerable.Range(0, 900).Select(index => checked((byte)(index * 29 % 251 + 1))).ToArray();
+        await BuildFat32ResilienceImageAsync(path, payload);
+        await using (var device = new ImageBlockDevice(path))
+        {
+            var scan = await new Fat32Scanner(device, 0).ScanAsync();
+            Assert(!scan.Resilience.UsedBackupBootSector && scan.Resilience.PreferredFatCopy == 2 &&
+                   scan.Resilience.UsedSecondFatForAnyChain && scan.Resilience.FatCopies.Count == 2 &&
+                   !scan.Resilience.FatCopies[0].IsValid && scan.Resilience.FatCopies[1].IsValid,
+                "invalid FAT1 selects structurally valid FAT2");
+            var file = scan.Candidates.Single(candidate => candidate.Name == "假期照片.jpg");
+            Assert(file.Extents.Count == 2 && file.Extents[0].LogicalCluster == 5 && file.Extents[1].LogicalCluster == 6,
+                "deleted file chain is resolved through FAT2");
+            var recovered = await RecoveryWriter.RecoverFat32Async(device, scan, file,
+                Path.Combine(outputDir, "fat32-fat2-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmssfff")));
+            Assert((await File.ReadAllBytesAsync(recovered.OutputPath)).SequenceEqual(payload), "FAT2 recovery bytes");
+        }
+
+        var backupPath = Path.Combine(imageDir, "synthetic-fat32-backup-and-fat2.img");
+        var backupBytes = await File.ReadAllBytesAsync(path);
+        backupBytes[510] = 0;
+        backupBytes[511] = 0;
+        await File.WriteAllBytesAsync(backupPath, backupBytes);
+        await using (var device = new ImageBlockDevice(backupPath))
+        {
+            var table = await PartitionScanner.ScanAsync(device);
+            var enriched = await PartitionScanner.EnrichWithBackupStructuresAsync(device, table);
+            Assert(enriched.Single().FileSystem == FileSystemKind.Fat32 &&
+                   enriched.Single().BootSectorOffset == 6UL * SectorSize,
+                "table-listed FAT32 range is routed through its backup boot sector");
+            var scan = await new Fat32Scanner(device, 0).ScanAsync();
+            Assert(scan.Resilience.UsedBackupBootSector && scan.Resilience.BootOffset == 6UL * SectorSize &&
+                   scan.Resilience.PreferredFatCopy == 2 && scan.Resilience.UsedSecondFatForAnyChain,
+                "damaged primary boot and FAT1 independently use backup boot and FAT2");
+            Assert(scan.Candidates.Any(candidate => candidate.Name == "假期照片.jpg"),
+                "backup structures still expose deleted metadata");
+        }
+
+        var lostBackupPath = Path.Combine(imageDir, "synthetic-lost-fat32-backup.img");
+        const int lostOffset = 1024 * 1024;
+        var lostDisk = new byte[lostOffset + backupBytes.Length + SectorSize];
+        backupBytes.CopyTo(lostDisk, lostOffset);
+        await File.WriteAllBytesAsync(lostBackupPath, lostDisk);
+        await using (var device = new ImageBlockDevice(lostBackupPath))
+        {
+            var known = await PartitionScanner.ScanAsync(device);
+            var found = await PartitionScanner.FindLostPartitionsAsync(device, known);
+            Assert(found.Any(partition => partition.FileSystem == FileSystemKind.Fat32 &&
+                       partition.Offset == lostOffset && partition.BootSectorOffset == lostOffset + 6UL * SectorSize),
+                "lost FAT32 partition is inferred from its backup boot sector");
+        }
+    }
+
+    private static async Task TestQuickFormatRecoveryScenariosAsync(string imageDir, string outputDir)
+    {
+        // NTFS quick format: a new, empty current MFT is written at a different LCN while
+        // sector-aligned records from the old MFT remain elsewhere on the volume. Ordinary
+        // current-MFT traversal must not manufacture an old name; the explicit whole-volume
+        // old-MFT stage may preserve that name and recover its data exactly.
+        var ntfsPath = Path.Combine(imageDir, "synthetic-ntfs-quick-format.img");
+        await BuildNtfsImageAsync(ntfsPath);
+        var ntfsBytes = await File.ReadAllBytesAsync(ntfsPath);
+        const int freshMftLcn = 100;
+        const int freshMftClusters = 4;
+        BinaryPrimitives.WriteInt64LittleEndian(ntfsBytes.AsSpan(48, 8), freshMftLcn);
+        var freshMftOffset = freshMftLcn * ClusterSize;
+        ntfsBytes.AsSpan(freshMftOffset, freshMftClusters * ClusterSize).Clear();
+        var freshMftRecordZero = CreateRecord(0, true, false, "$MFT", 5, null,
+            freshMftLcn, freshMftClusters, 16UL * RecordSize);
+        freshMftRecordZero.CopyTo(ntfsBytes.AsSpan(freshMftOffset));
+        CreateRecord(5, true, true, ".", 5, null, 0, 0, 0)
+            .CopyTo(ntfsBytes.AsSpan(freshMftOffset + 5 * RecordSize));
+        // A quick format also refreshes the mirror copy of record 0. The historical records at
+        // the old MFT and remote aligned locations are intentionally left untouched.
+        freshMftRecordZero.CopyTo(ntfsBytes.AsSpan(2 * ClusterSize));
+        await File.WriteAllBytesAsync(ntfsPath, ntfsBytes);
+
+        await using (var ntfsDevice = new ImageBlockDevice(ntfsPath))
+        {
+            var current = await new NtfsScanner(ntfsDevice, 0).ScanAsync(new ScanOptions());
+            Assert(current.Candidates.All(candidate => candidate.Name != "年度数据.xlsx"),
+                "fresh NTFS MFT does not expose an old filename through ordinary metadata traversal");
+            var historical = await new NtfsScanner(ntfsDevice, 0)
+                .ScanAsync(new ScanOptions(FullDiskMetadataScan: true));
+            var oldFile = historical.Candidates.Single(candidate => candidate.Name == "年度数据.xlsx");
+            Assert(oldFile.Discovery == RecoveryDiscovery.NtfsFullDiskMft &&
+                   oldFile.OriginalPath == Path.Combine("归档资料", "年度数据.xlsx"),
+                "surviving old NTFS records preserve the original filename and parent path");
+            var recovered = await RecoveryWriter.RecoverNtfsAsync(ntfsDevice, historical, oldFile,
+                Path.Combine(outputDir, "quick-format-ntfs-" + Guid.NewGuid().ToString("N")));
+            Assert((await File.ReadAllBytesAsync(recovered.OutputPath)).SequenceEqual(FullDiskPayload),
+                "NTFS quick-format old-MFT candidate recovers exact bytes");
+        }
+
+        // exFAT quick format: install a fresh root directory and allocation bitmap at new
+        // clusters, but leave a deleted entry set and its payload in the old directory cluster.
+        // Only the explicit deep-metadata stage is allowed to surface that surviving filename.
+        var exFatPath = Path.Combine(imageDir, "synthetic-exfat-quick-format.img");
+        var exFatPayload = BuildSyntheticJpegWithTrailingData();
+        await BuildExFatImageAsync(exFatPath, exFatPayload);
+        var exFatBytes = await File.ReadAllBytesAsync(exFatPath);
+        const int exFatFatOffset = 24 * SectorSize;
+        const int exFatFatLength = 8 * SectorSize;
+        const int exFatHeapOffset = 128 * SectorSize;
+        const uint freshExFatRootCluster = 30;
+        const uint freshExFatBitmapCluster = 31;
+        BinaryPrimitives.WriteUInt32LittleEndian(exFatBytes.AsSpan(96, 4), freshExFatRootCluster);
+        exFatBytes.AsSpan(exFatFatOffset, exFatFatLength).Clear();
+        BinaryPrimitives.WriteUInt32LittleEndian(exFatBytes.AsSpan(exFatFatOffset, 4), 0xFFFFFFF8);
+        BinaryPrimitives.WriteUInt32LittleEndian(exFatBytes.AsSpan(exFatFatOffset + 4, 4), uint.MaxValue);
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            exFatBytes.AsSpan(exFatFatOffset + checked((int)freshExFatRootCluster * 4), 4), uint.MaxValue);
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            exFatBytes.AsSpan(exFatFatOffset + checked((int)freshExFatBitmapCluster * 4), 4), uint.MaxValue);
+        exFatBytes.AsSpan(exFatHeapOffset, 2 * ClusterSize).Clear(); // old root and bitmap were overwritten
+        var freshRootOffset = exFatHeapOffset + checked((int)(freshExFatRootCluster - 2) * ClusterSize);
+        var freshBitmapOffset = exFatHeapOffset + checked((int)(freshExFatBitmapCluster - 2) * ClusterSize);
+        exFatBytes.AsSpan(freshRootOffset, ClusterSize).Clear();
+        exFatBytes[freshRootOffset] = 0x81;
+        BinaryPrimitives.WriteUInt32LittleEndian(exFatBytes.AsSpan(freshRootOffset + 20, 4), freshExFatBitmapCluster);
+        BinaryPrimitives.WriteUInt64LittleEndian(exFatBytes.AsSpan(freshRootOffset + 24, 8), 125);
+        exFatBytes.AsSpan(freshBitmapOffset, ClusterSize).Clear();
+        foreach (var cluster in new[] { freshExFatRootCluster, freshExFatBitmapCluster })
+        {
+            var bit = checked((int)(cluster - 2));
+            exFatBytes[freshBitmapOffset + bit / 8] |= checked((byte)(1 << (bit % 8)));
+        }
+        await File.WriteAllBytesAsync(exFatPath, exFatBytes);
+
+        await using (var exFatDevice = new ImageBlockDevice(exFatPath))
+        {
+            var current = await new ExFatScanner(exFatDevice, 0).ScanAsync();
+            Assert(current.Candidates.All(candidate => candidate.Name != "假期照片.jpg"),
+                "fresh exFAT root does not expose an unreachable old filename");
+            var historical = await new ExFatScanner(exFatDevice, 0)
+                .ScanAsync(new ScanOptions(ExFatDeepMetadataScan: true));
+            var oldFile = historical.Candidates.Single(candidate => candidate.Name == "假期照片.jpg");
+            Assert(oldFile.Discovery == RecoveryDiscovery.ExFatDeepMetadata &&
+                   Path.GetFileName(oldFile.OriginalPath) == "假期照片.jpg",
+                "surviving exFAT entry set preserves the original filename without inventing the lost parent path");
+            var recovered = await RecoveryWriter.RecoverExFatAsync(exFatDevice, historical, oldFile,
+                Path.Combine(outputDir, "quick-format-exfat-" + Guid.NewGuid().ToString("N")));
+            Assert((await File.ReadAllBytesAsync(recovered.OutputPath)).SequenceEqual(exFatPayload),
+                "exFAT quick-format deep-metadata candidate recovers exact bytes");
+        }
+
+        // FAT32 boundary A: a partial quick format refreshed boot/FAT structures but left the
+        // reachable directory sectors intact. Because the directory metadata still exists, the
+        // original long filename and path are a valid expectation.
+        var fatPayload = JpegPayload;
+        var fatMetadataPath = Path.Combine(imageDir, "synthetic-fat32-quick-format-metadata-survives.img");
+        await BuildFat32ImageAsync(fatMetadataPath, fatPayload);
+        var fatMetadataBytes = await File.ReadAllBytesAsync(fatMetadataPath);
+        BinaryPrimitives.WriteUInt32LittleEndian(fatMetadataBytes.AsSpan(67, 4), 0x20260825);
+        const int fatOffset = 32 * SectorSize;
+        fatMetadataBytes.AsSpan(fatOffset, 128 * SectorSize).Clear();
+        BinaryPrimitives.WriteUInt32LittleEndian(fatMetadataBytes.AsSpan(fatOffset, 4), 0x0FFFFFF8);
+        BinaryPrimitives.WriteUInt32LittleEndian(fatMetadataBytes.AsSpan(fatOffset + 4, 4), 0x0FFFFFFF);
+        BinaryPrimitives.WriteUInt32LittleEndian(fatMetadataBytes.AsSpan(fatOffset + 8, 4), 0x0FFFFFFF);  // root cluster 2
+        BinaryPrimitives.WriteUInt32LittleEndian(fatMetadataBytes.AsSpan(fatOffset + 12, 4), 0x0FFFFFFF); // surviving directory cluster 3
+        fatMetadataBytes.AsSpan(SectorSize, SectorSize).Clear();
+        BinaryPrimitives.WriteUInt32LittleEndian(fatMetadataBytes.AsSpan(SectorSize, 4), 0x41615252);
+        BinaryPrimitives.WriteUInt32LittleEndian(fatMetadataBytes.AsSpan(SectorSize + 484, 4), 0x61417272);
+        BinaryPrimitives.WriteUInt32LittleEndian(fatMetadataBytes.AsSpan(SectorSize + 488, 4), uint.MaxValue);
+        BinaryPrimitives.WriteUInt32LittleEndian(fatMetadataBytes.AsSpan(SectorSize + 492, 4), uint.MaxValue);
+        BinaryPrimitives.WriteUInt32LittleEndian(fatMetadataBytes.AsSpan(SectorSize + 508, 4), 0xAA550000);
+        await File.WriteAllBytesAsync(fatMetadataPath, fatMetadataBytes);
+
+        await using (var fatMetadataDevice = new ImageBlockDevice(fatMetadataPath))
+        {
+            var scan = await new Fat32Scanner(fatMetadataDevice, 0).ScanAsync();
+            var oldFile = scan.Candidates.Single(candidate => candidate.Name == "假期照片.jpg");
+            Assert(oldFile.Discovery == RecoveryDiscovery.FatMetadata &&
+                   oldFile.OriginalPath == Path.Combine("相册", "假期照片.jpg"),
+                "reachable FAT32 directory metadata preserves the original filename and path");
+            var recovered = await RecoveryWriter.RecoverFat32Async(fatMetadataDevice, scan, oldFile,
+                Path.Combine(outputDir, "quick-format-fat32-metadata-" + Guid.NewGuid().ToString("N")));
+            Assert((await File.ReadAllBytesAsync(recovered.OutputPath)).SequenceEqual(fatPayload),
+                "FAT32 quick-format metadata candidate recovers exact bytes");
+        }
+
+        // FAT32 boundary B: a fresh root makes the old directory sectors unreachable. The native
+        // metadata scan must not claim the old name; content scanning may find the JPEG payload,
+        // but it must use a generated temporary name.
+        var fatRawPath = Path.Combine(imageDir, "synthetic-fat32-quick-format-metadata-overwritten.img");
+        var fatRawBytes = fatMetadataBytes.ToArray();
+        const uint freshFatRootCluster = 20;
+        BinaryPrimitives.WriteUInt32LittleEndian(fatRawBytes.AsSpan(44, 4), freshFatRootCluster);
+        fatRawBytes.AsSpan(fatOffset, 128 * SectorSize).Clear();
+        BinaryPrimitives.WriteUInt32LittleEndian(fatRawBytes.AsSpan(fatOffset, 4), 0x0FFFFFF8);
+        BinaryPrimitives.WriteUInt32LittleEndian(fatRawBytes.AsSpan(fatOffset + 4, 4), 0x0FFFFFFF);
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            fatRawBytes.AsSpan(fatOffset + checked((int)freshFatRootCluster * 4), 4), 0x0FFFFFFF);
+        var fatDataOffset = (32 + 128) * SectorSize;
+        fatRawBytes.AsSpan(fatDataOffset + checked((int)(freshFatRootCluster - 2) * SectorSize), SectorSize).Clear();
+        await File.WriteAllBytesAsync(fatRawPath, fatRawBytes);
+
+        await using (var fatRawDevice = new ImageBlockDevice(fatRawPath))
+        {
+            var metadata = await new Fat32Scanner(fatRawDevice, 0).ScanAsync();
+            Assert(metadata.Candidates.All(candidate => candidate.Name != "假期照片.jpg"),
+                "overwritten FAT32 root does not manufacture the old filename");
+            var raw = await new SignatureCarver(fatRawDevice).ScanAsync();
+            var carved = raw.Single(candidate => candidate.Extension == "jpg" && candidate.SourceOffset == (ulong)(fatDataOffset + 3 * SectorSize));
+            Assert(carved.Discovery == RecoveryDiscovery.FileSignature && carved.Name != "假期照片.jpg" &&
+                   carved.OriginalPath.Contains("Raw Recovery", StringComparison.Ordinal),
+                "FAT32 content-only recovery uses a generated temporary name when directory metadata is unavailable");
+            var recovered = await RecoveryWriter.RecoverRawAsync(fatRawDevice, carved,
+                Path.Combine(outputDir, "quick-format-fat32-raw-" + Guid.NewGuid().ToString("N")));
+            Assert((await File.ReadAllBytesAsync(recovered.OutputPath)).SequenceEqual(fatPayload),
+                "FAT32 quick-format RAW candidate recovers exact bytes without claiming an original name");
+        }
+    }
+
+    private static async Task TestConservativeImagingAsync(string imageDir)
+    {
+        var runDirectory = Path.Combine(imageDir, "conservative-imaging-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(runDirectory);
+        const int sourceLength = 8 * 1024 * 1024;
+        const ulong badOffset = 2UL * 1024 * 1024;
+        var sourceBytes = new byte[sourceLength];
+        for (var index = 0; index < sourceBytes.Length; index++)
+            sourceBytes[index] = checked((byte)(index * 31 % 251 + 1));
+        await using var source = new FaultInjectingBlockDevice("synthetic-one-bad-sector", sourceBytes, badOffset, SectorSize);
+        var imagePath = Path.Combine(runDirectory, "synthetic-one-bad-sector-clone.img");
+        var cancellation = new CancellationTokenSource();
+        var progress = new InlineProgress<ScanProgress>(item =>
+        {
+            if (item.Stage == "正在创建镜像" && item.Processed >= 4UL * 1024 * 1024)
+                cancellation.Cancel();
+        });
+        var cancelled = false;
+        try
+        {
+            _ = await new DiskImager(source, progress).CreateImageAsync(imagePath, cancellation.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+        }
+        Assert(cancelled && File.Exists(imagePath + ".state.json") && File.Exists(imagePath + ".badmap.json") &&
+               new FileInfo(imagePath).Length == 4L * 1024 * 1024,
+            "cancelled imaging persists an aligned partial image and state");
+
+        var resumed = await new DiskImager(source).CreateImageAsync(imagePath);
+        Assert(resumed.Complete && resumed.BytesProcessed == source.Length && resumed.ReadErrors == 1 &&
+               resumed.UnreadableBytes == SectorSize && resumed.BadRanges.Count == 1 &&
+               resumed.BadRanges[0].Offset == badOffset && resumed.BadRanges[0].Length == SectorSize &&
+               resumed.RetryAttempts > 0 && source.FailedReadCalls > 0,
+            "single bad sector is isolated and retained across resume");
+        var clone = await File.ReadAllBytesAsync(imagePath);
+        Assert(clone.AsSpan(checked((int)badOffset), SectorSize).ToArray().All(value => value == 0),
+            "only unreadable sector is zero-filled");
+        Assert(clone.AsSpan(0, checked((int)badOffset)).SequenceEqual(sourceBytes.AsSpan(0, checked((int)badOffset))) &&
+               clone.AsSpan(checked((int)badOffset + SectorSize)).SequenceEqual(sourceBytes.AsSpan(checked((int)badOffset + SectorSize))),
+            "healthy bytes surrounding bad sector are preserved exactly");
+        var badMap = JsonSerializer.Deserialize<ImagingBadSectorMap>(await File.ReadAllTextAsync(resumed.BadSectorMapPath));
+        Assert(badMap is not null && badMap.Complete && badMap.ReadErrors == 1 && badMap.UnreadableBytes == SectorSize &&
+               badMap.BadRanges.Single().Offset == badOffset,
+            "bad-sector map roundtrip");
+        await using (var reinserted = new FaultInjectingBlockDevice("renumbered-physical-drive", sourceBytes,
+                         checked((ulong)sourceBytes.Length), 0))
+        {
+            var sameMedium = await new DiskImager(reinserted).CreateImageAsync(imagePath);
+            Assert(sameMedium.Complete && sameMedium.Sha256 == resumed.Sha256,
+                "same medium resumes after its Windows physical-drive id changes");
+        }
+        var protectedHash = await FileSha256Async(imagePath);
+        var differentBytes = sourceBytes.ToArray();
+        differentBytes[0] ^= 0x5A;
+        await using (var differentMedium = new FaultInjectingBlockDevice("same-model-different-medium", differentBytes,
+                         checked((ulong)differentBytes.Length), 0))
+        {
+            var rejected = false;
+            try { _ = await new DiskImager(differentMedium).CreateImageAsync(imagePath); }
+            catch (InvalidOperationException) { rejected = true; }
+            Assert(rejected && await FileSha256Async(imagePath) == protectedHash,
+                "mismatched existing checkpoint fails closed without modifying the image");
+        }
+        Assert(!Directory.EnumerateFiles(runDirectory, "*.tmp", SearchOption.TopDirectoryOnly).Any(),
+            "atomic imaging state leaves no temporary files");
+    }
+
     private static async Task<string> HashDeviceRangeAsync(IBlockDevice device, ulong offset, ulong length)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -747,7 +1491,99 @@ internal static class Program
         return Convert.ToHexString(hash.GetHashAndReset());
     }
 
-    private static async Task BuildExFatImageAsync(string path, byte[] payload)
+    private static byte[] BuildEbrDisk(
+        uint firstLogicalSectors,
+        uint nextEbrRelative,
+        uint secondLogicalSectors,
+        uint secondNextEbrRelative)
+    {
+        const uint totalSectors = 32768;
+        const uint extendedStart = 2048;
+        const uint extendedSectors = 20000;
+        var disk = new byte[checked((int)totalSectors * SectorSize)];
+        disk[510] = 0x55;
+        disk[511] = 0xAA;
+        WriteMbrEntry(disk.AsSpan(446, 16), 0x0F, extendedStart, extendedSectors);
+
+        var firstEbr = disk.AsSpan(checked((int)extendedStart * SectorSize), SectorSize);
+        firstEbr[510] = 0x55;
+        firstEbr[511] = 0xAA;
+        WriteMbrEntry(firstEbr.Slice(446, 16), 0x0C, 63, firstLogicalSectors);
+        if (nextEbrRelative > 0)
+            WriteMbrEntry(firstEbr.Slice(462, 16), 0x0F, nextEbrRelative,
+                nextEbrRelative < extendedSectors ? extendedSectors - nextEbrRelative : 1000);
+
+        if (nextEbrRelative > 0 && nextEbrRelative < extendedSectors)
+        {
+            var secondLba = checked(extendedStart + nextEbrRelative);
+            var secondEbr = disk.AsSpan(checked((int)secondLba * SectorSize), SectorSize);
+            secondEbr[510] = 0x55;
+            secondEbr[511] = 0xAA;
+            if (secondLogicalSectors > 0)
+                WriteMbrEntry(secondEbr.Slice(446, 16), 0x07, 63, secondLogicalSectors);
+            if (secondNextEbrRelative > 0)
+                WriteMbrEntry(secondEbr.Slice(462, 16), 0x0F, secondNextEbrRelative,
+                    secondNextEbrRelative < extendedSectors ? extendedSectors - secondNextEbrRelative : 1000);
+        }
+        return disk;
+    }
+
+    private static void WriteMbrEntry(Span<byte> entry, byte type, uint firstLba, uint sectorCount)
+    {
+        entry.Clear();
+        entry[4] = type;
+        BinaryPrimitives.WriteUInt32LittleEndian(entry[8..12], firstLba);
+        BinaryPrimitives.WriteUInt32LittleEndian(entry[12..16], sectorCount);
+    }
+
+    private static Task BuildFat32ResilienceImageAsync(string path, byte[] payload)
+    {
+        const int bytesPerSector = 512;
+        const int totalSectors = 4096;
+        const int reservedSectors = 32;
+        const int fatSectors = 32;
+        const int numberOfFats = 2;
+        const int backupBootSector = 6;
+        var bytes = new byte[totalSectors * bytesPerSector];
+        var boot = bytes.AsSpan(0, SectorSize);
+        boot[0] = 0xEB;
+        boot[1] = 0x58;
+        boot[2] = 0x90;
+        "MSWIN4.1"u8.CopyTo(boot[3..]);
+        BinaryPrimitives.WriteUInt16LittleEndian(boot[11..13], bytesPerSector);
+        boot[13] = 1;
+        BinaryPrimitives.WriteUInt16LittleEndian(boot[14..16], reservedSectors);
+        boot[16] = numberOfFats;
+        BinaryPrimitives.WriteUInt32LittleEndian(boot[32..36], totalSectors);
+        BinaryPrimitives.WriteUInt32LittleEndian(boot[36..40], fatSectors);
+        BinaryPrimitives.WriteUInt32LittleEndian(boot[44..48], 2);
+        BinaryPrimitives.WriteUInt16LittleEndian(boot[50..52], backupBootSector);
+        "FAT32   "u8.CopyTo(boot[82..]);
+        boot[510] = 0x55;
+        boot[511] = 0xAA;
+        boot.CopyTo(bytes.AsSpan(backupBootSector * bytesPerSector, SectorSize));
+
+        // FAT1 intentionally remains all zero. FAT2 contains the only valid root, directory and
+        // deleted-file chains so the scanner must validate and select the second copy.
+        var fat2Offset = (reservedSectors + fatSectors) * bytesPerSector;
+        var fat2 = bytes.AsSpan(fat2Offset, fatSectors * bytesPerSector);
+        BinaryPrimitives.WriteUInt32LittleEndian(fat2[0..4], 0x0FFFFFF8);
+        BinaryPrimitives.WriteUInt32LittleEndian(fat2[4..8], 0x0FFFFFFF);
+        BinaryPrimitives.WriteUInt32LittleEndian(fat2[8..12], 0x0FFFFFFF);
+        BinaryPrimitives.WriteUInt32LittleEndian(fat2[12..16], 0x0FFFFFFF);
+        BinaryPrimitives.WriteUInt32LittleEndian(fat2.Slice(5 * 4, 4), 6);
+        BinaryPrimitives.WriteUInt32LittleEndian(fat2.Slice(6 * 4, 4), 0x0FFFFFFF);
+
+        var dataOffset = (reservedSectors + numberOfFats * fatSectors) * bytesPerSector;
+        WriteFatDirectorySet(bytes.AsSpan(dataOffset, SectorSize), 0, "相册", "ALBUM      ", false, true, 3, 0);
+        WriteFatDirectorySet(bytes.AsSpan(dataOffset + SectorSize, SectorSize), 0, "假期照片.jpg", "HOLIDAY JPG",
+            true, false, 5, checked((uint)payload.Length));
+        payload.AsSpan(0, SectorSize).CopyTo(bytes.AsSpan(dataOffset + 3 * SectorSize, SectorSize));
+        payload.AsSpan(SectorSize).CopyTo(bytes.AsSpan(dataOffset + 4 * SectorSize, payload.Length - SectorSize));
+        return File.WriteAllBytesAsync(path, bytes);
+    }
+
+    private static Task BuildExFatImageAsync(string path, byte[] payload)
     {
         const int imageSize = 8 * 1024 * 1024;
         const int fatOffsetSectors = 24;
@@ -813,10 +1649,10 @@ internal static class Program
         var orphanSet = BuildExFatEntrySet("孤立照片.png", false, false, 22, (ulong)ValidPngPayload.Length, true);
         orphanSet.CopyTo(bytes.AsSpan(heapOffset + 18 * ClusterSize)); // orphan directory data in cluster 20
         ValidPngPayload.CopyTo(bytes.AsSpan(heapOffset + 20 * ClusterSize)); // cluster 22
-        await File.WriteAllBytesAsync(path, bytes);
+        return File.WriteAllBytesAsync(path, bytes);
     }
 
-    private static async Task BuildFat32ImageAsync(string path, byte[] payload)
+    private static Task BuildFat32ImageAsync(string path, byte[] payload)
     {
         const int bytesPerSector = 512, reservedSectors = 32, fatSectors = 128, totalSectors = 16384;
         var bytes = new byte[totalSectors * bytesPerSector];
@@ -834,7 +1670,7 @@ internal static class Program
         WriteFatDirectorySet(bytes.AsSpan(dataOffset, 512), 0, "相册", "ALBUM      ", false, true, 3, 0);
         WriteFatDirectorySet(bytes.AsSpan(dataOffset + 512, 512), 0, "假期照片.jpg", "HOLIDAY JPG", true, false, 5, (uint)payload.Length);
         payload.CopyTo(bytes.AsSpan(dataOffset + 3 * 512));
-        await File.WriteAllBytesAsync(path, bytes);
+        return File.WriteAllBytesAsync(path, bytes);
     }
 
     private static void WriteFatDirectorySet(Span<byte> directory, int offset, string longName, string shortName11,
@@ -930,7 +1766,7 @@ internal static class Program
     private static byte[] BuildFragmentedExFatPayload() =>
         Enumerable.Range(0, 5000).Select(index => checked((byte)(index * 31 % 251 + 1))).ToArray();
 
-    private static async Task BuildNtfsImageAsync(string path)
+    private static Task BuildNtfsImageAsync(string path)
     {
         const int imageSize = 2 * 1024 * 1024;
         var bytes = new byte[imageSize];
@@ -944,6 +1780,8 @@ internal static class Program
         BinaryPrimitives.WriteInt64LittleEndian(boot[56..64], 2);
         boot[64] = unchecked((byte)-10);
         boot[68] = 1;
+        boot[510] = 0x55;
+        boot[511] = 0xAA;
 
         WriteRecord(bytes, 0, CreateRecord(0, true, false, "$MFT", 5, null, 4, 4, 16UL * RecordSize));
         WriteRecord(bytes, 5, CreateRecord(5, true, true, ".", 5, null, 0, 0, 0));
@@ -973,7 +1811,7 @@ internal static class Program
         CreateRecord(71, false, false, "年度数据.xlsx", 70, null, 50, 1, (ulong)FullDiskPayload.Length)
             .CopyTo(bytes.AsSpan(remoteDirectoryOffset + RecordSize));
         FullDiskPayload.CopyTo(bytes.AsSpan(50 * ClusterSize));
-        await File.WriteAllBytesAsync(path, bytes);
+        return File.WriteAllBytesAsync(path, bytes);
     }
 
     private static byte[] BuildSyntheticDocxSignature()
@@ -1233,12 +2071,6 @@ internal static class Program
         BinaryPrimitives.WriteUInt32LittleEndian(mbr.AsSpan(446 + 8, 4), 1);
         BinaryPrimitives.WriteUInt32LittleEndian(mbr.AsSpan(446 + 12, 4), uint.MaxValue);
         data[0] = mbr;
-        var gpt = new byte[512];
-        "EFI PART"u8.CopyTo(gpt);
-        BinaryPrimitives.WriteUInt64LittleEndian(gpt.AsSpan(72, 8), 2);
-        BinaryPrimitives.WriteUInt32LittleEndian(gpt.AsSpan(80, 4), 1);
-        BinaryPrimitives.WriteUInt32LittleEndian(gpt.AsSpan(84, 4), 128);
-        data[512] = gpt;
         var entrySector = new byte[512];
         new Guid("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7").TryWriteBytes(entrySector.AsSpan(0, 16));
         Guid.NewGuid().TryWriteBytes(entrySector.AsSpan(16, 16));
@@ -1247,9 +2079,74 @@ internal static class Program
         BinaryPrimitives.WriteUInt64LittleEndian(entrySector.AsSpan(32, 8), firstLba);
         BinaryPrimitives.WriteUInt64LittleEndian(entrySector.AsSpan(40, 8), lastLba);
         data[1024] = entrySector;
+        var gpt = new byte[512];
+        "EFI PART"u8.CopyTo(gpt);
+        BinaryPrimitives.WriteUInt32LittleEndian(gpt.AsSpan(8, 4), 0x00010000);
+        BinaryPrimitives.WriteUInt32LittleEndian(gpt.AsSpan(12, 4), 92);
+        BinaryPrimitives.WriteUInt64LittleEndian(gpt.AsSpan(24, 8), 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(gpt.AsSpan(32, 8), length / 512 - 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(gpt.AsSpan(40, 8), 34);
+        BinaryPrimitives.WriteUInt64LittleEndian(gpt.AsSpan(48, 8), length / 512 - 34);
+        Guid.NewGuid().TryWriteBytes(gpt.AsSpan(56, 16));
+        BinaryPrimitives.WriteUInt64LittleEndian(gpt.AsSpan(72, 8), 2);
+        BinaryPrimitives.WriteUInt32LittleEndian(gpt.AsSpan(80, 4), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(gpt.AsSpan(84, 4), 128);
+        BinaryPrimitives.WriteUInt32LittleEndian(gpt.AsSpan(88, 4), TestCrc32(entrySector.AsSpan(0, 128)));
+        BinaryPrimitives.WriteUInt32LittleEndian(gpt.AsSpan(16, 4), TestCrc32(gpt.AsSpan(0, 92)));
+        data[512] = gpt;
         await using var fake = new SparseBlockDevice(length, data);
         var parts = await PartitionScanner.ScanAsync(fake);
         Assert(parts.Count == 1 && parts[0].Offset == firstLba * 512 && parts[0].Length > 15UL * 1024 * 1024 * 1024 * 1024, "large GPT partition");
+    }
+
+    private sealed class ManualTimeProvider(DateTimeOffset utcNow) : TimeProvider
+    {
+        private DateTimeOffset _utcNow = utcNow;
+        public override DateTimeOffset GetUtcNow() => _utcNow;
+        public void Advance(TimeSpan value) => _utcNow = _utcNow.Add(value);
+    }
+
+    private sealed class InlineProgress<T>(Action<T> callback) : IProgress<T>
+    {
+        public void Report(T value) => callback(value);
+    }
+
+    private sealed class FaultInjectingBlockDevice(
+        string id,
+        byte[] bytes,
+        ulong badOffset,
+        int badLength) : IPreciseBlockDevice
+    {
+        public string Id { get; } = id;
+        public ulong Length => checked((ulong)bytes.Length);
+        public uint LogicalSectorSize => SectorSize;
+        public uint PhysicalSectorSize => 4096;
+        public bool IsReadOnly => true;
+        public int FailedReadCalls { get; private set; }
+
+        public ValueTask<int> ReadAsync(ulong offset, Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            ReadCoreAsync(offset, buffer, cancellationToken);
+
+        public ValueTask<int> ReadPreciseAsync(ulong offset, Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            ReadCoreAsync(offset, buffer, cancellationToken);
+
+        private ValueTask<int> ReadCoreAsync(ulong offset, Memory<byte> buffer, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (offset > Length || (ulong)buffer.Length > Length - offset)
+                throw new ArgumentOutOfRangeException(nameof(offset));
+            var end = checked(offset + (ulong)buffer.Length);
+            var badEnd = checked(badOffset + (ulong)badLength);
+            if (offset < badEnd && end > badOffset)
+            {
+                FailedReadCalls++;
+                throw new IOException($"Synthetic unreadable sector at {badOffset:N0}.");
+            }
+            bytes.AsMemory(checked((int)offset), buffer.Length).CopyTo(buffer);
+            return ValueTask.FromResult(buffer.Length);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class SparseBlockDevice(ulong length, Dictionary<ulong, byte[]> blocks) : IBlockDevice

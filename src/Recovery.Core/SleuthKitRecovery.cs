@@ -78,7 +78,7 @@ public static partial class RecoveryWriter
 public static partial class FileIntegrityValidator
 {
     public static bool SupportsSampleValidation(string extension) =>
-        extension.TrimStart('.').ToLowerInvariant() is "png" or "jpg" or "jpeg" or "pdf" or "zip" or "docx" or "xlsx" or "pptx" or "bmp" or "webp" or "wav" or "mp4" or "mov";
+        RecoveryCapabilityRegistry.SupportsPreflight(extension);
 
     public static async Task<FileIntegrityResult> ValidateSleuthKitCandidateAsync(
         string binDirectory,

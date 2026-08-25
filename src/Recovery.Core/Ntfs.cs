@@ -289,13 +289,29 @@ public sealed class NtfsScanner
     private readonly ulong _partitionOffset;
     private readonly IProgress<ScanProgress>? _progress;
     private readonly ulong? _bootSectorOffset;
+    private readonly Action<RecoveryCandidate>? _candidateAvailable;
 
-    public NtfsScanner(IBlockDevice device, ulong partitionOffset, IProgress<ScanProgress>? progress = null, ulong? bootSectorOffset = null)
+    public NtfsScanner(
+        IBlockDevice device,
+        ulong partitionOffset,
+        IProgress<ScanProgress>? progress = null,
+        ulong? bootSectorOffset = null)
+        : this(device, partitionOffset, progress, bootSectorOffset, null)
+    {
+    }
+
+    public NtfsScanner(
+        IBlockDevice device,
+        ulong partitionOffset,
+        IProgress<ScanProgress>? progress,
+        ulong? bootSectorOffset,
+        Action<RecoveryCandidate>? candidateAvailable)
     {
         _device = device;
         _partitionOffset = partitionOffset;
         _progress = progress;
         _bootSectorOffset = bootSectorOffset;
+        _candidateAvailable = candidateAvailable;
     }
 
     public async Task<NtfsScanResult> ScanAsync(ScanOptions options, CancellationToken cancellationToken = default)
@@ -303,14 +319,9 @@ public sealed class NtfsScanner
         var bootBytes = new byte[512];
         await _device.ReadExactlyAsync(_bootSectorOffset ?? _partitionOffset, bootBytes, cancellationToken);
         var boot = NtfsBootSector.Parse(bootBytes);
-        var firstMftRecordBytes = new byte[boot.FileRecordSize];
-        var firstMftOffset = checked(_partitionOffset + (ulong)boot.MftLcn * boot.ClusterSize);
-        await _device.ReadExactlyAsync(firstMftOffset, firstMftRecordBytes, cancellationToken);
-        var mftRecord = NtfsRecordParser.Parse(firstMftRecordBytes, 0, boot.BytesPerSector)
-            ?? throw new InvalidDataException("The NTFS master file table record is unreadable.");
-        var mftData = mftRecord.DefaultData;
-        if (mftData is null || mftData.Resident || mftData.Extents.Count == 0)
-            throw new InvalidDataException("The NTFS master file table runlist is unavailable.");
+        var mftRecordZero = await ReadMftRecordZeroAsync(boot, cancellationToken);
+        var firstMftOffset = mftRecordZero.FirstMftOffset;
+        var mftData = mftRecordZero.Data;
         var recordCount = Math.Min(mftData.RealSize / boot.FileRecordSize, 100_000_000UL);
         var directories = new Dictionary<long, (string Name, long Parent)> { [5] = (string.Empty, 5) };
         var candidates = new List<RecoveryCandidate>();
@@ -342,13 +353,28 @@ public sealed class NtfsScanner
         ulong parsedDeepRecords = 0;
         if (options.FullDiskMetadataScan)
         {
-            var deep = await ScanWholeVolumeForMftAsync(boot, mftData.Extents, mftData.RealSize, directories, candidates, cancellationToken);
+            var deep = await ScanWholeVolumeForMftAsync(
+                boot,
+                mftData.Extents,
+                mftData.RealSize,
+                directories,
+                candidates,
+                options.StartOffset,
+                cancellationToken);
             deepRecordsExamined = deep.Examined;
             parsedDeepRecords = deep.Parsed;
         }
         else if (options.DeepMetadataScan && options.DeepMetadataBytes > 0)
         {
-            var deep = await ScanDeepMftAsync(boot, mftData.RealSize, firstMftOffset, directories, candidates, options.DeepMetadataBytes, cancellationToken);
+            var deep = await ScanDeepMftAsync(
+                boot,
+                mftData.RealSize,
+                firstMftOffset,
+                directories,
+                candidates,
+                options.DeepMetadataBytes,
+                options.StartOffset,
+                cancellationToken);
             deepRecordsExamined = deep.Examined;
             parsedDeepRecords = deep.Parsed;
         }
@@ -383,18 +409,127 @@ public sealed class NtfsScanner
         return new(boot, _partitionOffset, mftData.Extents, candidates, recordCount, parsedCurrentRecords, deepRecordsExamined, parsedDeepRecords);
     }
 
+    private async Task<MftRecordZeroContext> ReadMftRecordZeroAsync(NtfsBootSector boot, CancellationToken cancellationToken)
+    {
+        Exception? primaryFailure = null;
+        try
+        {
+            return await ReadAndValidateMftRecordZeroAsync(boot, boot.MftLcn, false, cancellationToken);
+        }
+        catch (Exception ex) when (IsRecoverableMftRecordFailure(ex))
+        {
+            primaryFailure = ex;
+        }
+
+        try
+        {
+            var mirror = await ReadAndValidateMftRecordZeroAsync(boot, boot.MftMirrorLcn, true, cancellationToken);
+            _progress?.Report(new("NTFS 镜像元数据回退", 0, 0, 0,
+                "主 $MFT 记录 0 不可读，已通过只读 $MFTMirr 定位当前 MFT。"));
+            return mirror;
+        }
+        catch (Exception ex) when (IsRecoverableMftRecordFailure(ex))
+        {
+            throw new InvalidDataException(
+                $"The NTFS master file table record is unreadable. Primary: {primaryFailure?.Message} Mirror: {ex.Message}", ex);
+        }
+    }
+
+    private async Task<MftRecordZeroContext> ReadAndValidateMftRecordZeroAsync(
+        NtfsBootSector boot,
+        long recordLcn,
+        bool fromMirror,
+        CancellationToken cancellationToken)
+    {
+        var recordOffset = GetValidatedRecordOffset(boot, recordLcn, fromMirror ? "$MFTMirr" : "$MFT");
+        var recordBytes = new byte[boot.FileRecordSize];
+        await _device.ReadExactlyAsync(recordOffset, recordBytes, cancellationToken);
+        var record = NtfsRecordParser.Parse(recordBytes, 0, boot.BytesPerSector)
+            ?? throw new InvalidDataException($"The NTFS {((fromMirror) ? "$MFTMirr" : "$MFT")} record 0 is invalid.");
+        var data = ValidateMftRecordZero(record, boot, fromMirror);
+        var firstExtent = data.Extents[0];
+        var firstMftOffset = checked(_partitionOffset + (ulong)firstExtent.LogicalCluster * boot.ClusterSize);
+        return new(record, data, firstMftOffset, fromMirror);
+    }
+
+    private ulong GetValidatedRecordOffset(NtfsBootSector boot, long recordLcn, string sourceName)
+    {
+        if (recordLcn < 0)
+            throw new InvalidDataException($"The NTFS {sourceName} location is negative.");
+        var volumeLength = GetValidatedVolumeLength(boot);
+        var relativeOffset = checked((ulong)recordLcn * boot.ClusterSize);
+        if (relativeOffset > volumeLength || boot.FileRecordSize > volumeLength - relativeOffset)
+            throw new InvalidDataException($"The NTFS {sourceName} record lies outside the declared volume.");
+        var absoluteOffset = checked(_partitionOffset + relativeOffset);
+        if (absoluteOffset > _device.Length || boot.FileRecordSize > _device.Length - absoluteOffset)
+            throw new InvalidDataException($"The NTFS {sourceName} record lies outside the source device.");
+        return absoluteOffset;
+    }
+
+    private static NtfsDataAttribute ValidateMftRecordZero(NtfsRecord record, NtfsBootSector boot, bool fromMirror)
+    {
+        var sourceName = fromMirror ? "$MFTMirr" : "$MFT";
+        if (record.Number != 0 || record.Sequence == 0 || !record.InUse || record.IsDirectory)
+            throw new InvalidDataException($"The NTFS {sourceName} copy is not a trustworthy MFT record 0.");
+        var data = record.DefaultData;
+        if (data is null || data.Resident || data.Sparse || data.Extents.Count == 0 || data.RealSize < boot.FileRecordSize ||
+            data.RealSize % boot.FileRecordSize != 0)
+            throw new InvalidDataException($"The NTFS {sourceName} record 0 has no trustworthy MFT runlist.");
+
+        var volumeLength = GetValidatedVolumeLength(boot);
+        var totalClusters = volumeLength / boot.ClusterSize;
+        ulong describedBytes = 0;
+        foreach (var extent in data.Extents)
+        {
+            if (extent.Sparse || extent.LogicalCluster < 0 || extent.ClusterCount <= 0)
+                throw new InvalidDataException($"The NTFS {sourceName} MFT runlist contains an invalid extent.");
+            var start = (ulong)extent.LogicalCluster;
+            var count = (ulong)extent.ClusterCount;
+            if (start >= totalClusters || count > totalClusters - start)
+                throw new InvalidDataException($"The NTFS {sourceName} MFT runlist extends beyond the declared volume.");
+            describedBytes = checked(describedBytes + count * boot.ClusterSize);
+        }
+        if (describedBytes < data.RealSize)
+            throw new InvalidDataException($"The NTFS {sourceName} MFT runlist is shorter than its declared data size.");
+        return data;
+    }
+
+    private static ulong GetValidatedVolumeLength(NtfsBootSector boot)
+    {
+        var volumeLength = checked(boot.TotalSectors * boot.BytesPerSector);
+        if (volumeLength < boot.FileRecordSize || boot.ClusterSize == 0)
+            throw new InvalidDataException("Invalid NTFS volume geometry.");
+        return volumeLength;
+    }
+
+    private static bool IsRecoverableMftRecordFailure(Exception exception) =>
+        exception is IOException or InvalidDataException or EndOfStreamException or OverflowException or ArgumentOutOfRangeException;
+
+    private sealed record MftRecordZeroContext(
+        NtfsRecord Record,
+        NtfsDataAttribute Data,
+        ulong FirstMftOffset,
+        bool FromMirror);
+
     private async Task<(ulong Examined, ulong Parsed)> ScanWholeVolumeForMftAsync(
         NtfsBootSector boot,
         IReadOnlyList<DataExtent> currentMftExtents,
         ulong currentMftLength,
         IReadOnlyDictionary<long, (string Name, long Parent)> currentDirectories,
         List<RecoveryCandidate> allCandidates,
+        ulong resumeOffset,
         CancellationToken cancellationToken)
     {
         var volumeLength = checked(boot.TotalSectors * boot.BytesPerSector);
         var volumeStart = _partitionOffset;
         var volumeEnd = Math.Min(_device.Length, checked(volumeStart + volumeLength));
         const int scanBlockSize = 8 * 1024 * 1024;
+        var requestedStart = ValidateResumeOffset(resumeOffset, volumeStart, volumeEnd);
+        if (requestedStart == volumeEnd) return (0, 0);
+        var scanStart = resumeOffset == 0
+            ? volumeStart
+            : AlignDown(requestedStart, volumeStart, scanBlockSize);
+        var candidateFloor = resumeOffset == 0 ? volumeStart : requestedStart;
         var overlap = checked((int)boot.FileRecordSize - 1);
         var buffer = new byte[scanBlockSize + overlap];
         var currentMftRanges = new List<(ulong Start, ulong End)>();
@@ -415,13 +550,17 @@ public sealed class NtfsScanner
         var historical = new List<RecoveryCandidate>();
         var seenRecords = new HashSet<ulong>();
         var seenCandidates = new HashSet<string>(StringComparer.Ordinal);
+        var seenRecoveryCandidates = new HashSet<string>(
+            allCandidates.Select(BuildStableCandidateIdentity),
+            StringComparer.OrdinalIgnoreCase);
         var totalClusters = volumeLength / boot.ClusterSize;
         ulong parsed = 0;
         var carry = 0;
 
-        for (var position = volumeStart; position < volumeEnd;)
+        for (var position = scanStart; position < volumeEnd;)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var completedThisBlock = new List<RecoveryCandidate>();
             var requested = checked((int)Math.Min((ulong)scanBlockSize, volumeEnd - position));
             var read = await _device.ReadAsync(position, buffer.AsMemory(carry, requested), cancellationToken);
             if (read <= 0) break;
@@ -451,20 +590,26 @@ public sealed class NtfsScanner
                     directories[record.Number] = (name.Name, name.ParentRecord);
                     continue;
                 }
+                if (absolute < candidateFloor) continue;
                 var data = record.DefaultData;
                 if (data is { Resident: false } && data.Extents.Any(extent => !IsPlausibleExtent(extent, totalClusters))) continue;
                 if (data is { RealSize: > 0 } && data.RealSize > volumeLength) continue;
                 var firstLcn = data is { Extents.Count: > 0 } ? data.Extents[0].LogicalCluster : -1;
                 var key = $"{record.Number}:{record.Sequence}:{name.Name}:{data?.RealSize ?? 0}:{firstLcn}";
                 if (!seenCandidates.Add(key)) continue;
-                historical.Add(CreateCandidate(record, name, boot, absolute, !record.InUse, RecoveryDiscovery.NtfsFullDiskMft));
+                var candidate = CreateCandidate(record, name, boot, absolute, !record.InUse, RecoveryDiscovery.NtfsFullDiskMft);
+                if (!seenRecoveryCandidates.Add(BuildStableCandidateIdentity(candidate))) continue;
+                historical.Add(candidate);
+                completedThisBlock.Add(candidate);
             }
 
             position += checked((ulong)read);
             carry = Math.Min(overlap, valid);
             buffer.AsSpan(valid - carry, carry).CopyTo(buffer);
+            PublishCandidates(completedThisBlock, directories);
             _progress?.Report(new("NTFS 全盘旧 MFT 搜索", position - volumeStart, volumeEnd - volumeStart, historical.Count,
-                $"已扫描 {(position - volumeStart) / (1024 * 1024):N0} MiB，有效旧记录 {parsed:N0}"));
+                $"已扫描 {(position - volumeStart) / (1024 * 1024):N0} MiB，有效旧记录 {parsed:N0}",
+                CheckpointPosition: position, CheckpointTotal: volumeEnd));
         }
 
         foreach (var candidate in historical)
@@ -472,7 +617,7 @@ public sealed class NtfsScanner
             candidate.OriginalPath = BuildPath(candidate.ParentRecordNumber, candidate.Name, directories);
             allCandidates.Add(candidate);
         }
-        return ((volumeEnd - volumeStart) / boot.FileRecordSize, parsed);
+        return ((volumeEnd - scanStart) / boot.FileRecordSize, parsed);
     }
 
     private async Task<(ulong Examined, ulong Parsed)> ScanDeepMftAsync(
@@ -482,21 +627,30 @@ public sealed class NtfsScanner
         IReadOnlyDictionary<long, (string Name, long Parent)> currentDirectories,
         List<RecoveryCandidate> allCandidates,
         ulong maximumBytes,
+        ulong resumeOffset,
         CancellationToken cancellationToken)
     {
         var recordSize = checked((ulong)boot.FileRecordSize);
         var alignedCurrentLength = checked((currentMftLength + recordSize - 1) / recordSize * recordSize);
-        var start = checked(firstMftOffset + alignedCurrentLength);
+        var naturalStart = checked(firstMftOffset + alignedCurrentLength);
         var volumeLength = checked(boot.TotalSectors * boot.BytesPerSector);
+        var volumeStart = _partitionOffset;
         var volumeEnd = Math.Min(_device.Length, checked(_partitionOffset + volumeLength));
-        if (start >= volumeEnd) return (0, 0);
-        var end = Math.Min(volumeEnd, checked(start + Math.Min(maximumBytes, volumeEnd - start)));
+        var requestedStart = ValidateResumeOffset(resumeOffset, volumeStart, volumeEnd);
+        if (naturalStart >= volumeEnd) return (0, 0);
+        var end = Math.Min(volumeEnd, checked(naturalStart + Math.Min(maximumBytes, volumeEnd - naturalStart)));
+        var candidateFloor = resumeOffset == 0 ? naturalStart : Math.Max(naturalStart, requestedStart);
+        if (candidateFloor >= end) return (0, 0);
+        var start = AlignDown(candidateFloor, naturalStart, recordSize);
         const int preferredBlock = 8 * 1024 * 1024;
         var blockSize = checked((int)((ulong)preferredBlock / recordSize * recordSize));
         var buffer = new byte[blockSize];
         var deepDirectories = new Dictionary<long, (string Name, long Parent)>(currentDirectories);
         var deepCandidates = new List<RecoveryCandidate>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
+        var seenRecoveryCandidates = new HashSet<string>(
+            allCandidates.Select(BuildStableCandidateIdentity),
+            StringComparer.OrdinalIgnoreCase);
         ulong examined = 0;
         ulong parsed = 0;
         var totalClusters = volumeLength / boot.ClusterSize;
@@ -504,6 +658,7 @@ public sealed class NtfsScanner
         for (var position = start; position < end;)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var completedThisBlock = new List<RecoveryCandidate>();
             var count = checked((int)Math.Min((ulong)buffer.Length, end - position));
             count -= count % checked((int)recordSize);
             if (count == 0) break;
@@ -511,12 +666,8 @@ public sealed class NtfsScanner
             for (var slot = 0; slot < count; slot += checked((int)recordSize))
             {
                 examined++;
-                var raw = buffer.AsSpan(slot, checked((int)recordSize));
-                if (!raw[..4].SequenceEqual("FILE"u8)) continue;
                 var fallback = checked((long)((position + (ulong)slot - firstMftOffset) / recordSize));
-                NtfsRecord? record;
-                try { record = NtfsRecordParser.Parse(raw, fallback, boot.BytesPerSector); }
-                catch (Exception ex) when (ex is InvalidDataException or OverflowException or ArgumentOutOfRangeException) { continue; }
+                var record = ParseDeepRecord(buffer, slot, checked((int)recordSize), fallback, boot.BytesPerSector);
                 if (record is null || record.Number is < 16 or > 100_000_000 || record.Sequence == 0) continue;
                 parsed++;
                 var name = record.PreferredName;
@@ -526,6 +677,8 @@ public sealed class NtfsScanner
                     deepDirectories[record.Number] = (name.Name, name.ParentRecord);
                     continue;
                 }
+                var recordOffset = checked(position + (ulong)slot);
+                if (recordOffset < candidateFloor) continue;
                 var data = record.DefaultData;
                 if (data is { Resident: false } && data.Extents.Any(extent => !IsPlausibleExtent(extent, totalClusters)))
                     continue;
@@ -533,11 +686,16 @@ public sealed class NtfsScanner
                 var firstLcn = data is { Extents.Count: > 0 } ? data.Extents[0].LogicalCluster : -1;
                 var key = $"{record.Number}:{record.Sequence}:{name.Name}:{data?.RealSize ?? 0}:{firstLcn}";
                 if (!seen.Add(key)) continue;
-                deepCandidates.Add(CreateCandidate(record, name, boot, position + (ulong)slot, !record.InUse, RecoveryDiscovery.NtfsDeepMft));
+                var candidate = CreateCandidate(record, name, boot, recordOffset, !record.InUse, RecoveryDiscovery.NtfsDeepMft);
+                if (!seenRecoveryCandidates.Add(BuildStableCandidateIdentity(candidate))) continue;
+                deepCandidates.Add(candidate);
+                completedThisBlock.Add(candidate);
             }
             position += checked((ulong)count);
+            PublishCandidates(completedThisBlock, deepDirectories);
             _progress?.Report(new("NTFS 深度元数据扫描", position - start, end - start, deepCandidates.Count,
-                $"已检查旧 MFT 记录槽 {examined:N0}，有效旧记录 {parsed:N0}"));
+                $"已检查旧 MFT 记录槽 {examined:N0}，有效旧记录 {parsed:N0}",
+                CheckpointPosition: position, CheckpointTotal: end));
         }
 
         foreach (var candidate in deepCandidates)
@@ -547,6 +705,56 @@ public sealed class NtfsScanner
         }
         return (examined, parsed);
     }
+
+    private static NtfsRecord? ParseDeepRecord(byte[] buffer, int offset, int recordSize, long fallbackNumber,
+        ushort bytesPerSector)
+    {
+        var raw = buffer.AsSpan(offset, recordSize);
+        if (!raw[..4].SequenceEqual("FILE"u8)) return null;
+        try
+        {
+            return NtfsRecordParser.Parse(raw, fallbackNumber, bytesPerSector);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or OverflowException or ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    private static ulong ValidateResumeOffset(ulong resumeOffset, ulong volumeStart, ulong volumeEnd)
+    {
+        if (resumeOffset == 0) return volumeStart;
+        if (resumeOffset < volumeStart || resumeOffset > volumeEnd)
+            throw new InvalidDataException("The NTFS scan resume offset lies outside the selected volume.");
+        return resumeOffset;
+    }
+
+    private static ulong AlignDown(ulong value, ulong origin, ulong alignment)
+    {
+        if (alignment == 0 || value <= origin) return origin;
+        return checked(origin + (value - origin) / alignment * alignment);
+    }
+
+    private void PublishCandidates(
+        IEnumerable<RecoveryCandidate> candidates,
+        IReadOnlyDictionary<long, (string Name, long Parent)> directories)
+    {
+        if (_candidateAvailable is null) return;
+        foreach (var candidate in candidates)
+        {
+            candidate.OriginalPath = BuildPath(candidate.ParentRecordNumber, candidate.Name, directories);
+            _candidateAvailable(candidate);
+        }
+    }
+
+    private static string BuildStableCandidateIdentity(RecoveryCandidate candidate) => string.Join('|',
+        (int)candidate.FileSystem,
+        candidate.RecordNumber,
+        candidate.ParentRecordNumber,
+        candidate.Name,
+        candidate.Size,
+        candidate.IsResident,
+        candidate.SourceOffset);
 
     private static bool IsPlausibleExtent(DataExtent extent, ulong totalClusters)
     {

@@ -1,6 +1,0 @@
-<Solution>
-  <Project Path="src/Recovery.Core/Recovery.Core.csproj" />
-  <Project Path="src/Recovery.App/Recovery.App.csproj" />
-  <Project Path="tests/Recovery.Tests/Recovery.Tests.csproj" />
-  <Project Path="tests/Recovery.UiTests/Recovery.UiTests.csproj" />
-</Solution>

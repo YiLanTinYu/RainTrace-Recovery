@@ -1,4 +1,5 @@
 using Microsoft.Win32.SafeHandles;
+using System.Buffers;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 
@@ -14,7 +15,17 @@ public interface IBlockDevice : IAsyncDisposable
     ValueTask<int> ReadAsync(ulong offset, Memory<byte> buffer, CancellationToken cancellationToken = default);
 }
 
-public sealed class PausableBlockDevice : IBlockDevice
+/// <summary>
+/// Optional read path that must request exactly the supplied byte range from the underlying device.
+/// It is used by conservative imaging after a large read fails so cache read-ahead cannot make a
+/// neighbouring healthy sector look unreadable.
+/// </summary>
+public interface IPreciseBlockDevice : IBlockDevice
+{
+    ValueTask<int> ReadPreciseAsync(ulong offset, Memory<byte> buffer, CancellationToken cancellationToken = default);
+}
+
+public sealed class PausableBlockDevice : IPreciseBlockDevice
 {
     private readonly IBlockDevice _inner;
     private readonly object _sync = new();
@@ -52,6 +63,16 @@ public sealed class PausableBlockDevice : IBlockDevice
         return await _inner.ReadAsync(offset, buffer, cancellationToken);
     }
 
+    public async ValueTask<int> ReadPreciseAsync(ulong offset, Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        Task wait;
+        lock (_sync) wait = _resume.Task;
+        await wait.WaitAsync(cancellationToken);
+        return _inner is IPreciseBlockDevice precise
+            ? await precise.ReadPreciseAsync(offset, buffer, cancellationToken)
+            : await _inner.ReadAsync(offset, buffer, cancellationToken);
+    }
+
     public async ValueTask DisposeAsync()
     {
         Resume();
@@ -65,7 +86,7 @@ public sealed class PausableBlockDevice : IBlockDevice
     }
 }
 
-public sealed class ImageBlockDevice : IBlockDevice
+public sealed class ImageBlockDevice : IPreciseBlockDevice
 {
     private readonly SafeFileHandle _handle;
     public string Id { get; }
@@ -89,6 +110,9 @@ public sealed class ImageBlockDevice : IBlockDevice
         return RandomAccess.ReadAsync(_handle, buffer, checked((long)offset), cancellationToken);
     }
 
+    public ValueTask<int> ReadPreciseAsync(ulong offset, Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+        ReadAsync(offset, buffer, cancellationToken);
+
     public ValueTask DisposeAsync()
     {
         _handle.Dispose();
@@ -96,7 +120,7 @@ public sealed class ImageBlockDevice : IBlockDevice
     }
 }
 
-public sealed partial class WindowsPhysicalDiskDevice : IBlockDevice
+public sealed partial class WindowsPhysicalDiskDevice : IPreciseBlockDevice
 {
     private const uint GenericRead = 0x80000000;
     private const uint ShareRead = 0x00000001;
@@ -175,6 +199,29 @@ public sealed partial class WindowsPhysicalDiskDevice : IBlockDevice
         }
         finally
         {
+            _ioGate.Release();
+        }
+    }
+
+    public async ValueTask<int> ReadPreciseAsync(ulong offset, Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        if (offset > long.MaxValue) throw new ArgumentOutOfRangeException(nameof(offset));
+        if (offset >= Length || buffer.IsEmpty) return 0;
+        var count = checked((int)Math.Min((ulong)buffer.Length, Length - offset));
+        await _ioGate.WaitAsync(cancellationToken);
+        byte[]? rented = null;
+        try
+        {
+            ReadOnlyMemory<byte> readOnlyBuffer = buffer;
+            var direct = MemoryMarshal.TryGetArray(readOnlyBuffer, out var segment) && segment.Array is not null && segment.Offset == 0;
+            var target = direct ? segment.Array! : rented = ArrayPool<byte>.Shared.Rent(count);
+            var read = await Task.Run(() => ReadNative(offset, target, count), cancellationToken);
+            if (!direct && read > 0) target.AsMemory(0, read).CopyTo(buffer);
+            return read;
+        }
+        finally
+        {
+            if (rented is not null) ArrayPool<byte>.Shared.Return(rented);
             _ioGate.Release();
         }
     }

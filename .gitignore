@@ -7,6 +7,7 @@ artifacts/
 *.log
 TestResults/
 .dotnet-home/
+.dotnet-home-*/
 .test-output/
 dist/
 recovery-output/

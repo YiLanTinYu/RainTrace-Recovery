@@ -7,6 +7,8 @@ public enum MediaCategory { Unknown, HardDisk, SolidState, UsbStorage, MemoryCar
 public enum FileSystemKind { Unknown, Ntfs, Fat12, Fat16, Fat32, ExFat }
 public enum RecoveryQuality { Excellent, Good, Partial, Poor, Overwritten, TrimmedOrZeroed, Unknown }
 public enum RecoveryDiscovery { SleuthKitMetadata, NtfsCurrentMft, NtfsDeepMft, NtfsFullDiskMft, ExFatMetadata, ExFatDeepMetadata, FatMetadata, FileSignature, PhotoRecFile }
+public enum RecoveryScenario { DeletedFiles, FormattedOrRaw, LostPartition }
+public enum RecoveryConfidence { High, Medium, Low, Unknown }
 
 public sealed record MediaDescriptor(
     string Id,
@@ -52,7 +54,8 @@ public sealed record PartitionDescriptor(
     string Name,
     FileSystemKind FileSystem,
     bool IsGpt,
-    ulong? BootSectorOffset = null);
+    ulong? BootSectorOffset = null,
+    PartitionEvidence? Evidence = null);
 
 public sealed record DataExtent(long LogicalCluster, long ClusterCount, bool Sparse = false);
 
@@ -81,6 +84,17 @@ public sealed class RecoveryCandidate
     [JsonIgnore]
     public IReadOnlyList<RecoveryCandidate> AlternateCandidates { get; set; } = [];
     public int DuplicateRecordCount => 1 + AlternateCandidates.Count;
+    public bool CanRecover => !IsDirectory;
+    public string QualityLabel => Quality switch
+    {
+        RecoveryQuality.Excellent => "优秀",
+        RecoveryQuality.Good => "良好",
+        RecoveryQuality.Partial => "部分可恢复",
+        RecoveryQuality.Poor => "较差",
+        RecoveryQuality.Overwritten => "数据已覆盖",
+        RecoveryQuality.TrimmedOrZeroed => "TRIM / 已清零",
+        _ => "未知"
+    };
     public string DiscoveryLabel => Discovery switch
     {
         RecoveryDiscovery.SleuthKitMetadata => "TSK 文件系统元数据（原名）",
@@ -101,9 +115,17 @@ public sealed class RecoveryCandidate
         FileIntegrityState.Salvaged => "画面已抢救",
         _ => "未预检"
     };
+    public string ModifiedLabel => ModifiedUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "未知";
 }
 
-public sealed record ScanProgress(string Stage, ulong Processed, ulong Total, int Candidates, string Message)
+public sealed record ScanProgress(
+    string Stage,
+    ulong Processed,
+    ulong Total,
+    int Candidates,
+    string Message,
+    ulong? CheckpointPosition = null,
+    ulong? CheckpointTotal = null)
 {
     public double Percent => Total == 0 ? 0 : Math.Min(100, Processed * 100d / Total);
 }

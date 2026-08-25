@@ -19,7 +19,7 @@ public static partial class FileIntegrityValidator
         var extension = candidate.Extension;
         if (extension is not ("png" or "jpg" or "jpeg" or "pdf" or "zip" or "docx" or "xlsx" or "pptx" or "bmp" or "webp" or "wav" or "mp4" or "mov" or
             "gif" or "tif" or "tiff" or "mp3" or "avi" or "rar" or "7z" or "doc" or "xls" or "ppt" or
-            "txt" or "csv" or "log" or "ini" or "md" or "markdown" or "json" or "xml" or "yaml" or "yml"))
+            "txt" or "csv" or "log" or "ini" or "json" or "xml" or "yaml" or "yml"))
             return new(FileIntegrityState.NotChecked, "此文件类型暂未提供恢复前结构预检。");
         try
         {
@@ -63,7 +63,7 @@ public static partial class FileIntegrityValidator
                 ? Valid("恢复前预检通过：ISO-BMFF文件头和媒体容器标记存在。") : Damaged("恢复前预检失败：MP4/MOV容器头或媒体盒缺失。");
         if (extension is "gif" or "tif" or "tiff" or "mp3" or "avi" or "rar" or "7z" or "doc" or "xls" or "ppt")
             return ValidateAdditionalSamples(extension, size, head, tail);
-        if (extension is "txt" or "csv" or "log" or "ini" or "md" or "markdown" or "json" or "xml" or "yaml" or "yml")
+        if (extension is "txt" or "csv" or "log" or "ini" or "json" or "xml" or "yaml" or "yml")
             return ValidateTextSamples(extension, size, head);
         return new(FileIntegrityState.NotChecked, "此文件类型暂未提供恢复前结构预检。");
     }
@@ -90,7 +90,7 @@ public static partial class FileIntegrityValidator
                 "rar" => await ValidateRarAsync(path, cancellationToken),
                 "7z" => await Validate7ZipAsync(path, cancellationToken),
                 "doc" or "xls" or "ppt" => await ValidateCompoundDocumentAsync(path, extension, cancellationToken),
-                "txt" or "csv" or "log" or "ini" or "md" or "markdown" or "json" or "xml" or "yaml" or "yml" => await ValidateTextFileAsync(path, extension, cancellationToken),
+                "txt" or "csv" or "log" or "ini" or "json" or "xml" or "yaml" or "yml" => await ValidateTextFileAsync(path, extension, cancellationToken),
                 _ => new(FileIntegrityState.NotChecked, "此文件类型暂未提供结构完整性校验。")
             };
         }

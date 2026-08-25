@@ -61,9 +61,13 @@ public sealed class ExFatScanResult
 public sealed class ExFatScanner
 {
     private const ulong MaximumDirectoryBytes = 256UL * 1024 * 1024;
+    private const int DeepMetadataBlockSize = 8 * 1024 * 1024;
+    private const int DeepMetadataOverlap = 1024;
+    private const ulong ExFatDirectoryEntrySize = 32;
     private readonly IBlockDevice _device;
     private readonly ulong _partitionOffset;
     private readonly IProgress<ScanProgress>? _progress;
+    private readonly IProgress<RecoveryCandidate>? _deepCandidateProgress;
     private readonly ulong? _bootSectorOffset;
     private ExFatBootSector _boot = null!;
     private ulong _fatOffset;
@@ -75,11 +79,18 @@ public sealed class ExFatScanner
     private ulong _directoryBytesRead;
 
     public ExFatScanner(IBlockDevice device, ulong partitionOffset, IProgress<ScanProgress>? progress = null, ulong? bootSectorOffset = null)
+        : this(device, partitionOffset, progress, bootSectorOffset, null)
+    {
+    }
+
+    public ExFatScanner(IBlockDevice device, ulong partitionOffset, IProgress<ScanProgress>? progress,
+        ulong? bootSectorOffset, IProgress<RecoveryCandidate>? deepCandidateProgress)
     {
         _device = device;
         _partitionOffset = partitionOffset;
         _progress = progress;
         _bootSectorOffset = bootSectorOffset;
+        _deepCandidateProgress = deepCandidateProgress;
     }
 
     public async Task<ExFatScanResult> ScanAsync(ScanOptions? options = null, CancellationToken cancellationToken = default)
@@ -91,7 +102,20 @@ public sealed class ExFatScanner
         _fatOffset = checked(_partitionOffset + ((ulong)_boot.FatOffsetSectors + (ulong)_boot.ActiveFat * _boot.FatLengthSectors) * _boot.BytesPerSector);
         _clusterHeapOffset = checked(_partitionOffset + (ulong)_boot.ClusterHeapOffsetSectors * _boot.BytesPerSector);
         await ScanDirectoryAsync(_boot.RootDirectoryCluster, null, false, string.Empty, options.IncludeActiveFiles, cancellationToken);
-        if (options.ExFatDeepMetadataScan) await ScanDeepMetadataAsync(cancellationToken);
+        if (options.ExFatDeepMetadataScan)
+        {
+            // A non-zero StartOffset resumes only the deep-metadata stage. The caller already
+            // owns the candidates from completed stages, so do not return the directory scan's
+            // candidates again when it combines this result with its persisted candidate index.
+            // The directory walk above is still useful because it loads the allocation bitmap
+            // used by recoverability scoring.
+            if (options.StartOffset != 0)
+            {
+                _candidates.Clear();
+                _candidateKeys.Clear();
+            }
+            await ScanDeepMetadataAsync(options.StartOffset, cancellationToken);
+        }
         if (options.EvaluateRecoverability) await ScoreCandidatesAsync(cancellationToken);
         DeduplicateLogicalCandidates();
         _progress?.Report(new("exFAT 元数据扫描", 1, 1, _candidates.Count, $"找到 {_candidates.Count:N0} 个删除文件"));
@@ -145,23 +169,45 @@ public sealed class ExFatScanner
         _ => 7
     };
 
-    private async Task ScanDeepMetadataAsync(CancellationToken cancellationToken)
+    private async Task ScanDeepMetadataAsync(ulong startOffset, CancellationToken cancellationToken)
     {
-        const int blockSize = 8 * 1024 * 1024;
-        const int overlap = 1024;
         var volumeBytes = checked((ulong)_boot.ClusterCount * _boot.ClusterSize);
-        var buffer = new byte[blockSize + overlap];
+        var volumeEnd = checked(_clusterHeapOffset + volumeBytes);
+        var resumeOffset = startOffset == 0 ? _clusterHeapOffset : startOffset;
+        if (resumeOffset < _clusterHeapOffset || resumeOffset > volumeEnd)
+            throw new ArgumentOutOfRangeException(nameof(startOffset), startOffset,
+                $"The exFAT deep-scan resume offset must be between {_clusterHeapOffset:N0} and {volumeEnd:N0} bytes.");
+
+        if (resumeOffset == volumeEnd)
+        {
+            _progress?.Report(new("exFAT 深度元数据扫描", volumeBytes, volumeBytes, _candidates.Count, "深度元数据扫描已完成",
+                CheckpointPosition: volumeEnd, CheckpointTotal: volumeEnd));
+            return;
+        }
+
+        // Re-read at most one full scanner block before the checkpoint so an entry set near a
+        // block boundary has the same parsing context as an uninterrupted scan. Candidates from
+        // this replay window are filtered against resumeOffset below.
+        var relativeResume = resumeOffset - _clusterHeapOffset;
+        var entryAlignedResume = relativeResume - relativeResume % ExFatDirectoryEntrySize;
+        var processed = entryAlignedResume - entryAlignedResume % (ulong)DeepMetadataBlockSize;
+        var buffer = new byte[DeepMetadataBlockSize + DeepMetadataOverlap];
         var seenOffsets = new HashSet<ulong>();
         var known = _candidates.Select(item => $"{item.Name}\0{item.Size}\0{item.SourceOffset}").ToHashSet(StringComparer.OrdinalIgnoreCase);
         var carry = 0;
-        for (ulong processed = 0; processed < volumeBytes;)
+        while (processed < volumeBytes)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var requested = checked((int)Math.Min((ulong)blockSize, volumeBytes - processed));
+            var requested = checked((int)Math.Min((ulong)DeepMetadataBlockSize, volumeBytes - processed));
             var read = await _device.ReadAsync(checked(_clusterHeapOffset + processed), buffer.AsMemory(carry, requested), cancellationToken);
             if (read <= 0) break;
             var valid = carry + read;
             var baseOffset = checked(_clusterHeapOffset + processed - (ulong)carry);
+            var nextCarry = Math.Min(DeepMetadataOverlap, valid);
+            var physicalReadEnd = checked(processed + (ulong)read);
+            var stableThrough = physicalReadEnd >= volumeBytes
+                ? volumeEnd
+                : checked(_clusterHeapOffset + physicalReadEnd - (ulong)nextCarry);
             for (var local = 0; local + 96 <= valid; local += 32)
             {
                 var entryType = buffer[local];
@@ -171,30 +217,19 @@ public sealed class ExFatScanner
                 var setLength = checked((secondaryCount + 1) * 32);
                 if (local + setLength > valid) continue;
                 var absoluteEntry = checked(baseOffset + (ulong)local);
+                if (absoluteEntry < resumeOffset) continue;
+                // Keep the overlap window pending until the next read. Otherwise a checkpoint
+                // could advance past the primary entry of a set whose secondary entries have not
+                // been read yet. On the final block every complete set is stable.
+                if (absoluteEntry >= stableThrough) continue;
                 if ((absoluteEntry - _clusterHeapOffset) % 32 != 0 || !seenOffsets.Add(absoluteEntry)) continue;
-                var set = buffer.AsSpan(local, setLength);
-                if (!ValidateEntrySetChecksum(set, true)) continue;
-                var stream = set.Slice(32, 32);
-                if ((stream[0] & 0x7F) != 0x40) continue;
-                var nameLength = stream[3];
-                var requiredNames = (nameLength + 14) / 15;
-                if (nameLength is < 1 or > 255 || secondaryCount != 1 + requiredNames) continue;
-                var builder = new StringBuilder(requiredNames * 15); var namesValid = true;
-                for (var n = 0; n < requiredNames; n++)
-                {
-                    var nameEntry = set.Slice(64 + n * 32, 32);
-                    if ((nameEntry[0] & 0x7F) != 0x41) { namesValid = false; break; }
-                    builder.Append(Encoding.Unicode.GetString(nameEntry.Slice(2, 30)));
-                }
-                if (!namesValid || builder.Length < nameLength) continue;
-                var name = builder.ToString(0, nameLength);
-                if (string.IsNullOrWhiteSpace(name) || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) continue;
-                var attributes = BinaryPrimitives.ReadUInt16LittleEndian(set.Slice(4, 2));
-                if ((attributes & 0x10) != 0) continue;
-                var firstCluster = BinaryPrimitives.ReadUInt32LittleEndian(stream.Slice(20, 4));
-                var dataSize = BinaryPrimitives.ReadUInt64LittleEndian(stream.Slice(24, 8));
-                var noFat = (stream[1] & 0x02) != 0;
-                var modifiedUtc = ParseTimestamp(set.Slice(12, 4), set[21], set[23]);
+                var parsedEntry = ParseEntrySet(buffer, local, valid, requireExactNameEntryCount: true);
+                if (parsedEntry is not { } parsed || parsed.IsDirectory) continue;
+                var name = parsed.Name;
+                var firstCluster = parsed.FirstCluster;
+                var dataSize = parsed.DataSize;
+                var noFat = parsed.NoFatChain;
+                var modifiedUtc = parsed.ModifiedUtc;
                 if (dataSize > checked((ulong)_boot.ClusterCount * _boot.ClusterSize) || (dataSize > 0 && !IsValidCluster(firstCluster))) continue;
                 IReadOnlyList<DataExtent> extents = [];
                 if (dataSize > 0)
@@ -205,7 +240,7 @@ public sealed class ExFatScanner
                 var sourceOffset = extents.Count > 0 ? ExtentPhysicalOffset(extents[0]) : absoluteEntry;
                 var key = $"{name}\0{dataSize}\0{sourceOffset}";
                 if (!known.Add(key)) continue;
-                _candidates.Add(new RecoveryCandidate
+                var candidate = new RecoveryCandidate
                 {
                     RecordNumber = checked((long)(absoluteEntry / 32)), Name = name,
                     OriginalPath = Path.Combine("exFAT 深度扫描", name), Size = dataSize, IsDeleted = true,
@@ -213,13 +248,18 @@ public sealed class ExFatScanner
                     FileSystem = FileSystemKind.ExFat, Discovery = RecoveryDiscovery.ExFatDeepMetadata,
                     SourceOffset = sourceOffset, Quality = RecoveryQuality.Unknown,
                     QualityReason = "从exFAT簇区中发现通过条目组合、校验和及范围验证的残留删除记录。"
-                });
+                };
+                _candidates.Add(candidate);
+                // Fully parsed candidates are published before the enclosing block's byte
+                // checkpoint, allowing callers to persist the candidate index first.
+                _deepCandidateProgress?.Report(candidate);
             }
-            processed += checked((ulong)read);
-            carry = Math.Min(overlap, valid);
+            processed = physicalReadEnd;
+            carry = nextCarry;
             buffer.AsSpan(valid - carry, carry).CopyTo(buffer);
-            _progress?.Report(new("exFAT 深度元数据扫描", processed, volumeBytes, _candidates.Count,
-                $"已扫描 {processed / (1024 * 1024):N0} MiB"));
+            _progress?.Report(new("exFAT 深度元数据扫描", stableThrough - _clusterHeapOffset, volumeBytes, _candidates.Count,
+                $"已安全检查 {(stableThrough - _clusterHeapOffset) / (1024 * 1024):N0} MiB",
+                CheckpointPosition: stableThrough, CheckpointTotal: volumeEnd));
         }
     }
 
@@ -269,31 +309,15 @@ public sealed class ExFatScanner
             var secondaryCount = directory[offset + 1];
             var setLength = checked((secondaryCount + 1) * 32);
             if (secondaryCount < 2 || offset + setLength > directory.Length) continue;
-            var set = directory.AsSpan(offset, setLength);
-            var deleted = (entryType & 0x80) == 0;
-            if (!ValidateEntrySetChecksum(set, deleted)) continue;
-            var stream = set.Slice(32, 32);
-            if ((stream[0] & 0x7F) != 0x40) continue;
-            var nameLength = stream[3];
-            var requiredNames = (nameLength + 14) / 15;
-            if (nameLength is < 1 or > 255 || secondaryCount < 1 + requiredNames) continue;
-            var nameBuilder = new StringBuilder(requiredNames * 15);
-            var namesValid = true;
-            for (var n = 0; n < requiredNames; n++)
-            {
-                var nameEntry = set.Slice(64 + n * 32, 32);
-                if ((nameEntry[0] & 0x7F) != 0x41) { namesValid = false; break; }
-                nameBuilder.Append(Encoding.Unicode.GetString(nameEntry.Slice(2, 30)));
-            }
-            if (!namesValid || nameBuilder.Length < nameLength) continue;
-            var name = nameBuilder.ToString(0, nameLength);
-            if (string.IsNullOrWhiteSpace(name) || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) continue;
-            var attributes = BinaryPrimitives.ReadUInt16LittleEndian(set.Slice(4, 2));
-            var isDirectory = (attributes & 0x10) != 0;
-            var firstDataCluster = BinaryPrimitives.ReadUInt32LittleEndian(stream.Slice(20, 4));
-            var dataSize = BinaryPrimitives.ReadUInt64LittleEndian(stream.Slice(24, 8));
-            var noFat = (stream[1] & 0x02) != 0;
-            var modifiedUtc = ParseTimestamp(set.Slice(12, 4), set[21], set[23]);
+            var parsedEntry = ParseEntrySet(directory, offset, directory.Length, requireExactNameEntryCount: false);
+            if (parsedEntry is not { } parsed) continue;
+            var deleted = parsed.Deleted;
+            var name = parsed.Name;
+            var isDirectory = parsed.IsDirectory;
+            var firstDataCluster = parsed.FirstCluster;
+            var dataSize = parsed.DataSize;
+            var noFat = parsed.NoFatChain;
+            var modifiedUtc = parsed.ModifiedUtc;
             var maximumVolumeData = checked((ulong)_boot.ClusterCount * _boot.ClusterSize);
             if (dataSize > maximumVolumeData || (isDirectory && dataSize > MaximumDirectoryBytes)) continue;
             if (dataSize > 0 && !IsValidCluster(firstDataCluster)) continue;
@@ -520,6 +544,60 @@ public sealed class ExFatScanner
         var expected = BinaryPrimitives.ReadUInt16LittleEndian(set.Slice(2, 2));
         return ComputeEntrySetChecksum(set, deleted) == expected || (deleted && ComputeEntrySetChecksum(set, false) == expected);
     }
+
+    private static ParsedEntrySet? ParseEntrySet(byte[] source, int offset, int availableLength,
+        bool requireExactNameEntryCount)
+    {
+        if (offset < 0 || offset + 32 > availableLength || availableLength > source.Length) return null;
+        var entryType = source[offset];
+        if ((entryType & 0x7F) != 0x05) return null;
+        var secondaryCount = source[offset + 1];
+        var setLength = checked((secondaryCount + 1) * 32);
+        if (secondaryCount < 2 || offset + setLength > availableLength) return null;
+
+        var set = source.AsSpan(offset, setLength);
+        var deleted = (entryType & 0x80) == 0;
+        if (!ValidateEntrySetChecksum(set, deleted)) return null;
+        var stream = set.Slice(32, 32);
+        if ((stream[0] & 0x7F) != 0x40) return null;
+        var nameLength = stream[3];
+        var requiredNames = (nameLength + 14) / 15;
+        if (nameLength is < 1 or > 255 ||
+            (requireExactNameEntryCount ? secondaryCount != 1 + requiredNames : secondaryCount < 1 + requiredNames))
+            return null;
+
+        var nameBuilder = new StringBuilder(requiredNames * 15);
+        for (var n = 0; n < requiredNames; n++)
+        {
+            var nameEntry = set.Slice(64 + n * 32, 32);
+            if ((nameEntry[0] & 0x7F) != 0x41) return null;
+            nameBuilder.Append(Encoding.Unicode.GetString(nameEntry.Slice(2, 30)));
+        }
+        if (nameBuilder.Length < nameLength) return null;
+        var name = nameBuilder.ToString(0, nameLength);
+        if (string.IsNullOrWhiteSpace(name) || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return null;
+
+        var attributes = BinaryPrimitives.ReadUInt16LittleEndian(set.Slice(4, 2));
+        return new(
+            name,
+            deleted,
+            (attributes & 0x10) != 0,
+            BinaryPrimitives.ReadUInt32LittleEndian(stream.Slice(20, 4)),
+            BinaryPrimitives.ReadUInt64LittleEndian(stream.Slice(24, 8)),
+            (stream[1] & 0x02) != 0,
+            ParseTimestamp(set.Slice(12, 4), set[21], set[23]),
+            setLength);
+    }
+
+    private readonly record struct ParsedEntrySet(
+        string Name,
+        bool Deleted,
+        bool IsDirectory,
+        uint FirstCluster,
+        ulong DataSize,
+        bool NoFatChain,
+        DateTime? ModifiedUtc,
+        int SetLength);
 
     private static ushort ComputeEntrySetChecksum(ReadOnlySpan<byte> set, bool restoreInUseBits)
     {
