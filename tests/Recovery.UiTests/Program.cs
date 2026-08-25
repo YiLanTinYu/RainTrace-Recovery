@@ -93,6 +93,18 @@ internal static class Program
             .SingleOrDefault(item => item.Header?.ToString()?.Contains("高级设置", StringComparison.Ordinal) == true)
             ?? throw new InvalidOperationException("Advanced scan options expander was not found.");
 
+        var readableText = Color.FromRgb(0xEC, 0xF3, 0xFF);
+        Assert(window.Foreground is SolidColorBrush windowForeground && windowForeground.Color == readableText &&
+               deleted.Foreground is SolidColorBrush deletedForeground && deletedForeground.Color == readableText &&
+               formatted.Foreground is SolidColorBrush formattedForeground && formattedForeground.Color == readableText &&
+               lost.Foreground is SolidColorBrush lostForeground && lostForeground.Color == readableText &&
+               summary.Foreground is SolidColorBrush summaryForeground && summaryForeground.Color == readableText &&
+               advanced.Foreground is SolidColorBrush advancedForeground && advancedForeground.Color == readableText,
+            "scenario labels, summary and advanced header use an explicit high-contrast foreground");
+        Assert(FindVisualChildren<TextBlock>(window).All(item =>
+                   !item.Text.Contains("源介质永久只读", StringComparison.Ordinal)),
+            "the removed read-only marketing badge is not rendered in the header");
+
         Assert(deleted.IsChecked == true && formatted.IsChecked != true && lost.IsChecked != true,
             "the default layout exposes exactly three scenarios and selects deleted-file recovery");
         Assert(!advanced.IsExpanded && !scanOptions.IsVisible,
