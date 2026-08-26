@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:core="clr-namespace:Recovery.Core;assembly=Recovery.Core"
-        Title="雨痕数据恢复 1.15.1 · TSK/PhotoRec 只读安全模式" Width="1440" Height="900" MinWidth="1120" MinHeight="700"
+        Title="雨痕数据恢复 1.15.2 · TSK/PhotoRec 只读安全模式" Width="1440" Height="900" MinWidth="1120" MinHeight="700"
         WindowStartupLocation="CenterScreen" Background="{StaticResource BackgroundBrush}"
         Foreground="{StaticResource TextBrush}" FontFamily="Microsoft YaHei UI">
   <Grid Margin="22">
@@ -107,6 +107,24 @@
       </Grid>
     </Border>
     <Border x:Name="FilterCard" Grid.Row="2" Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,12" Effect="{StaticResource CardShadow}">
+      <Border.Resources>
+        <Style TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+          <Setter Property="Height" Value="42"/>
+          <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+        <Style TargetType="ComboBox" BasedOn="{StaticResource {x:Type ComboBox}}">
+          <Setter Property="Height" Value="42"/>
+          <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+        <Style TargetType="DatePicker" BasedOn="{StaticResource {x:Type DatePicker}}">
+          <Setter Property="Height" Value="42"/>
+          <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+        <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+          <Setter Property="Height" Value="42"/>
+          <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+      </Border.Resources>
       <StackPanel>
         <Grid>
           <Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="160"/><ColumnDefinition Width="145"/><ColumnDefinition Width="145"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>

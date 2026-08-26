@@ -107,7 +107,7 @@ internal static class Program
         Assert(FindVisualChildren<TextBlock>(window).All(item =>
                    !item.Text.Contains("源介质永久只读", StringComparison.Ordinal)),
             "the removed read-only marketing badge is not rendered in the header");
-        Assert(Math.Abs(modifiedFrom.ActualHeight - 38) < 0.5 && Math.Abs(modifiedTo.ActualHeight - 38) < 0.5 &&
+        Assert(Math.Abs(modifiedFrom.ActualHeight - 42) < 0.5 && Math.Abs(modifiedTo.ActualHeight - 42) < 0.5 &&
                modifiedFrom.VerticalAlignment == VerticalAlignment.Bottom && modifiedTo.VerticalAlignment == VerticalAlignment.Bottom,
             "date range controls use the compact input height and align to the filter-row baseline");
 
@@ -172,6 +172,13 @@ internal static class Program
         Assert(sourceCard.Effect is not null && filterCard.Effect is not null && categoryCard.Effect is not null &&
                resultsCard.Effect is not null && previewCard.Effect is not null,
             "primary functional sections have a restrained card shadow for visual separation");
+        var filterControls = FindVisualChildren<Control>(filterCard)
+            .Where(item => item.TemplatedParent is null &&
+                           (item is TextBox || item is ComboBox || item is DatePicker || item is Button))
+            .ToArray();
+        var filterHeightSummary = string.Join(", ", filterControls.Select(item => $"{item.Name}:{item.GetType().Name}={item.ActualHeight:0.0}"));
+        Assert(filterControls.Length == 17 && filterControls.All(item => Math.Abs(item.ActualHeight - 42) < 0.5),
+            $"both filter rows use one 42-pixel height for inputs, selectors and buttons ({filterHeightSummary})");
     }
 
     private static void TestResultViews(MainWindow window)
