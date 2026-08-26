@@ -8,7 +8,7 @@
     <ApplicationManifest Condition="'$(SmokeTestMode)' == 'true'">app.smoke.manifest</ApplicationManifest>
     <AssemblyName>雨痕数据恢复</AssemblyName>
     <RootNamespace>Recovery.App</RootNamespace>
-    <Version>1.15.2</Version>
+    <Version>1.15.3</Version>
     <DefineConstants Condition="'$(SmokeTestMode)' == 'true'">$(DefineConstants);YUHEN_UI_SMOKE</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
@@ -20,6 +20,7 @@
   <ItemGroup>
     <Content Include="..\..\third_party\runtime\testdisk-7.2\photorec_win.exe" Link="PhotoRec\photorec_win.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\third_party\runtime\testdisk-7.2\cyg*.dll" Link="PhotoRec\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\third_party\runtime\testdisk-7.2\63\cygwin" Link="PhotoRec\63\cygwin" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\third_party\runtime\testdisk-7.2\COPYING.txt" Link="PhotoRec\COPYING.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\third_party\runtime\testdisk-7.2\VERSION.txt" Link="PhotoRec\VERSION.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\third_party\runtime\PhotoRec-SOURCE.txt" Link="PhotoRec\SOURCE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

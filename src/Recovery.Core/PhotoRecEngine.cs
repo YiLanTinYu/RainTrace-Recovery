@@ -96,6 +96,9 @@ public static partial class PhotoRecEngine
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
+        var executableDirectory = Path.GetDirectoryName(startInfo.FileName)!;
+        if (File.Exists(Path.Combine(executableDirectory, "63", "cygwin")))
+            startInfo.Environment["TERMINFO"] = executableDirectory;
         foreach (var argument in BuildArguments(options)) startInfo.ArgumentList.Add(argument);
 
         using var process = new Process { StartInfo = startInfo };

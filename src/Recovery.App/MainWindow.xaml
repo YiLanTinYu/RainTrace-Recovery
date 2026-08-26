@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:core="clr-namespace:Recovery.Core;assembly=Recovery.Core"
-        Title="雨痕数据恢复 1.15.2 · TSK/PhotoRec 只读安全模式" Width="1440" Height="900" MinWidth="1120" MinHeight="700"
+        Title="雨痕数据恢复 1.15.3 · TSK/PhotoRec 只读安全模式" Width="1440" Height="900" MinWidth="1120" MinHeight="700"
         WindowStartupLocation="CenterScreen" Background="{StaticResource BackgroundBrush}"
         Foreground="{StaticResource TextBrush}" FontFamily="Microsoft YaHei UI">
   <Grid Margin="22">

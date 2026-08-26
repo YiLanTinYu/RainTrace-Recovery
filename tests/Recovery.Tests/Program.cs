@@ -215,7 +215,13 @@ internal static class Program
         }
         if (args.Length > 5 && args[0] == "--recoverntfs")
         {
-            await using var physical = new WindowsPhysicalDiskDevice(args[1]);
+            var logicalSectorSize = args.Length > 7
+                ? uint.Parse(args[7], System.Globalization.CultureInfo.InvariantCulture)
+                : 512u;
+            var physicalSectorSize = args.Length > 8
+                ? uint.Parse(args[8], System.Globalization.CultureInfo.InvariantCulture)
+                : Math.Max(logicalSectorSize, 4096u);
+            await using var physical = new WindowsPhysicalDiskDevice(args[1], logicalSectorSize, physicalSectorSize);
             var offset = ulong.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture);
             var mode = args[3];
             var exactName = args[4];
@@ -964,6 +970,7 @@ internal static class Program
         Directory.CreateDirectory(Path.GetDirectoryName(damagedPath)!);
         await File.WriteAllTextAsync(damagedPath, "damaged acceptance fixture", Encoding.UTF8);
         await File.WriteAllTextAsync(Path.Combine(partialRecovery, "extra-file.tmp"), "extra", Encoding.UTF8);
+        await File.WriteAllTextAsync(Path.Combine(partialRecovery, "report.xml"), "PhotoRec auxiliary report", Encoding.UTF8);
 
         var partial = await AcceptanceCaseService.VerifyAsync(generated.ManifestPath, partialRecovery, Path.Combine(root, "partial-report"));
         Assert(partial.Report.Summary.Expected == 13 && partial.Report.Summary.ContentRecovered == 2 &&

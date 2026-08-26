@@ -2,6 +2,7 @@ using Recovery.App;
 using Recovery.Core;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
@@ -38,6 +39,8 @@ internal static class Program
             Assert(window.Title.Contains("雨痕数据恢复", StringComparison.Ordinal) &&
                    window.Title.Contains("只读安全模式", StringComparison.Ordinal),
                 "main window identifies RainTrace and read-only safe mode without pinning tests to one release number");
+            Assert(File.Exists(Path.Combine(AppContext.BaseDirectory, "PhotoRec", "63", "cygwin")),
+                "published PhotoRec runtime includes the Cygwin terminal database required from a separate working directory");
 
             TestSourceSelector(window);
             TestLightSectionTheme(window);

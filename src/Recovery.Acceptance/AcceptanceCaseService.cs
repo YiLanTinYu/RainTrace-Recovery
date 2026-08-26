@@ -160,8 +160,10 @@ public static class AcceptanceCaseService
         foreach (var path in Directory.EnumerateFiles(recoveredRoot, "*", SearchOption.AllDirectories))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var relativePath = NormalizeRelativePath(Path.GetRelativePath(recoveredRoot, path));
+            if (IsRecoveryEngineAuxiliaryFile(relativePath)) continue;
             var info = new FileInfo(path);
-            recovered.Add(new RecoveredFile(path, NormalizeRelativePath(Path.GetRelativePath(recoveredRoot, path)),
+            recovered.Add(new RecoveredFile(path, relativePath,
                 info.Name, info.Length, await ComputeSha256Async(path, cancellationToken)));
         }
 
@@ -266,6 +268,11 @@ public static class AcceptanceCaseService
         var normalized = NormalizeRelativePath(path);
         return normalized.Split('/').All(segment => segment is not "" and not "." and not "..");
     }
+
+    private static bool IsRecoveryEngineAuxiliaryFile(string relativePath) =>
+        relativePath.Equals("report.xml", StringComparison.OrdinalIgnoreCase) ||
+        relativePath.Equals("photorec.log", StringComparison.OrdinalIgnoreCase) ||
+        relativePath.Equals("photorec.ses", StringComparison.OrdinalIgnoreCase);
 
     private static async Task<string> ComputeSha256Async(string path, CancellationToken cancellationToken)
     {
