@@ -40,6 +40,7 @@ internal static class Program
                 "main window identifies RainTrace and read-only safe mode without pinning tests to one release number");
 
             TestSourceSelector(window);
+            TestLightSectionTheme(window);
             TestScenarioLayout(window);
             TestResultViews(window);
             TestFiltersAndDirectorySafety(window);
@@ -93,7 +94,7 @@ internal static class Program
             .SingleOrDefault(item => item.Header?.ToString()?.Contains("高级设置", StringComparison.Ordinal) == true)
             ?? throw new InvalidOperationException("Advanced scan options expander was not found.");
 
-        var readableText = Color.FromRgb(0xEC, 0xF3, 0xFF);
+        var readableText = Color.FromRgb(0x17, 0x20, 0x33);
         Assert(window.Foreground is SolidColorBrush windowForeground && windowForeground.Color == readableText &&
                deleted.Foreground is SolidColorBrush deletedForeground && deletedForeground.Color == readableText &&
                formatted.Foreground is SolidColorBrush formattedForeground && formattedForeground.Color == readableText &&
@@ -145,6 +146,27 @@ internal static class Program
         Assert(scanOptions.IsVisible, "advanced options can be intentionally expanded");
         advanced.IsExpanded = false;
         window.UpdateLayout();
+    }
+
+    private static void TestLightSectionTheme(MainWindow window)
+    {
+        var sourceCard = FindRequired<Border>(window, "SourceScenarioCard");
+        var filterCard = FindRequired<Border>(window, "FilterCard");
+        var categoryCard = FindRequired<Border>(window, "CategoryCard");
+        var resultsCard = FindRequired<Border>(window, "ResultsCard");
+        var previewCard = FindRequired<Border>(window, "PreviewCard");
+
+        Assert(window.Background is SolidColorBrush canvas && canvas.Color == Color.FromRgb(0xEA, 0xF0, 0xF6),
+            "the main work area uses a light gray-blue canvas instead of a black board");
+        Assert(sourceCard.Background is SolidColorBrush source && source.Color == Colors.White &&
+               resultsCard.Background is SolidColorBrush results && results.Color == Colors.White &&
+               filterCard.Background is SolidColorBrush filter && filter.Color == Color.FromRgb(0xF5, 0xF8, 0xFC) &&
+               categoryCard.Background is SolidColorBrush category && category.Color == Color.FromRgb(0xF4, 0xF8, 0xFC) &&
+               previewCard.Background is SolidColorBrush preview && preview.Color == Color.FromRgb(0xF1, 0xFA, 0xF7),
+            "scan, filter, result and preview sections use distinct light card surfaces");
+        Assert(sourceCard.Effect is not null && filterCard.Effect is not null && categoryCard.Effect is not null &&
+               resultsCard.Effect is not null && previewCard.Effect is not null,
+            "primary functional sections have a restrained card shadow for visual separation");
     }
 
     private static void TestResultViews(MainWindow window)

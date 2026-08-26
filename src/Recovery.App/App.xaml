@@ -3,28 +3,31 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              StartupUri="MainWindow.xaml">
   <Application.Resources>
-    <SolidColorBrush x:Key="BackgroundBrush" Color="#0B1220"/>
-    <SolidColorBrush x:Key="PanelBrush" Color="#111B2E"/>
-    <SolidColorBrush x:Key="BorderBrush" Color="#263653"/>
-    <SolidColorBrush x:Key="TextBrush" Color="#ECF3FF"/>
-    <SolidColorBrush x:Key="MutedBrush" Color="#91A4C3"/>
-    <SolidColorBrush x:Key="AccentBrush" Color="#36C5A5"/>
-    <SolidColorBrush x:Key="GridHeaderBrush" Color="#1C2A44"/>
+    <SolidColorBrush x:Key="BackgroundBrush" Color="#EAF0F6"/>
+    <SolidColorBrush x:Key="PanelBrush" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="PanelAltBrush" Color="#F5F8FC"/>
+    <SolidColorBrush x:Key="PanelTealBrush" Color="#F1FAF7"/>
+    <SolidColorBrush x:Key="BorderBrush" Color="#C7D4E3"/>
+    <SolidColorBrush x:Key="TextBrush" Color="#172033"/>
+    <SolidColorBrush x:Key="MutedBrush" Color="#52657D"/>
+    <SolidColorBrush x:Key="AccentBrush" Color="#16836F"/>
+    <SolidColorBrush x:Key="GridHeaderBrush" Color="#203A5B"/>
     <SolidColorBrush x:Key="GridSelectionBrush" Color="#1D4ED8"/>
     <SolidColorBrush x:Key="GridSelectionBorderBrush" Color="#93C5FD"/>
-    <SolidColorBrush x:Key="GridMarkedBrush" Color="#145C4E"/>
-    <SolidColorBrush x:Key="GridMarkedBorderBrush" Color="#5EEAD4"/>
+    <SolidColorBrush x:Key="GridMarkedBrush" Color="#D9F4EC"/>
+    <SolidColorBrush x:Key="GridMarkedBorderBrush" Color="#28A98C"/>
+    <DropShadowEffect x:Key="CardShadow" Color="#2B4664" BlurRadius="12" ShadowDepth="1" Opacity="0.13"/>
     <Style TargetType="Window"><Setter Property="Background" Value="{StaticResource BackgroundBrush}"/><Setter Property="Foreground" Value="{StaticResource TextBrush}"/><Setter Property="FontFamily" Value="Microsoft YaHei UI"/></Style>
-    <Style TargetType="Button"><Setter Property="Background" Value="#1C2A44"/><Setter Property="Foreground" Value="{StaticResource TextBrush}"/><Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/><Setter Property="Padding" Value="16,9"/><Setter Property="Margin" Value="4"/><Setter Property="Cursor" Value="Hand"/></Style>
-    <Style TargetType="TextBox"><Setter Property="Background" Value="#0E1728"/><Setter Property="Foreground" Value="{StaticResource TextBrush}"/><Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/><Setter Property="Padding" Value="8"/></Style>
-    <Style TargetType="ComboBox"><Setter Property="Background" Value="#0E1728"/><Setter Property="Foreground" Value="#101827"/><Setter Property="Padding" Value="8"/></Style>
+    <Style TargetType="Button"><Setter Property="Background" Value="#F8FAFD"/><Setter Property="Foreground" Value="{StaticResource TextBrush}"/><Setter Property="BorderBrush" Value="#AFC0D2"/><Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="16,9"/><Setter Property="Margin" Value="4"/><Setter Property="Cursor" Value="Hand"/></Style>
+    <Style TargetType="TextBox"><Setter Property="Background" Value="#FFFFFF"/><Setter Property="Foreground" Value="{StaticResource TextBrush}"/><Setter Property="BorderBrush" Value="#B9C8D8"/><Setter Property="Padding" Value="8"/></Style>
+    <Style TargetType="ComboBox"><Setter Property="Background" Value="#FFFFFF"/><Setter Property="Foreground" Value="{StaticResource TextBrush}"/><Setter Property="BorderBrush" Value="#B9C8D8"/><Setter Property="Padding" Value="8"/></Style>
     <Style TargetType="CheckBox"><Setter Property="Foreground" Value="{StaticResource TextBrush}"/><Setter Property="Margin" Value="8,4"/></Style>
     <Style TargetType="RadioButton"><Setter Property="Foreground" Value="{StaticResource TextBrush}"/><Setter Property="Margin" Value="8,4"/><Setter Property="VerticalContentAlignment" Value="Center"/></Style>
     <Style TargetType="Expander"><Setter Property="Foreground" Value="{StaticResource TextBrush}"/></Style>
     <Style TargetType="DataGridColumnHeader">
       <Setter Property="Background" Value="{StaticResource GridHeaderBrush}"/>
       <Setter Property="Foreground" Value="#F8FAFC"/>
-      <Setter Property="BorderBrush" Value="#334766"/>
+      <Setter Property="BorderBrush" Value="#49627E"/>
       <Setter Property="BorderThickness" Value="0,0,1,1"/>
       <Setter Property="FontFamily" Value="Microsoft YaHei UI"/>
       <Setter Property="FontSize" Value="14"/>
@@ -33,21 +36,21 @@
       <Setter Property="HorizontalContentAlignment" Value="Left"/>
     </Style>
     <Style TargetType="DataGridRow">
-      <Setter Property="Foreground" Value="#EAF1FB"/>
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
       <Setter Property="FontFamily" Value="Microsoft YaHei UI"/>
       <Setter Property="FontSize" Value="14"/>
       <Setter Property="MinHeight" Value="36"/>
-      <Setter Property="Background" Value="#0E1728"/>
+      <Setter Property="Background" Value="#FFFFFF"/>
       <Setter Property="BorderThickness" Value="0"/>
       <Style.Triggers>
         <Trigger Property="AlternationIndex" Value="1">
-          <Setter Property="Background" Value="#121E32"/>
+          <Setter Property="Background" Value="#F4F7FB"/>
         </Trigger>
         <DataTrigger Binding="{Binding IsMarkedForRecovery}" Value="True">
           <Setter Property="Background" Value="{StaticResource GridMarkedBrush}"/>
           <Setter Property="BorderBrush" Value="{StaticResource GridMarkedBorderBrush}"/>
           <Setter Property="BorderThickness" Value="4,0,0,0"/>
-          <Setter Property="Foreground" Value="#FFFFFF"/>
+          <Setter Property="Foreground" Value="#123C34"/>
           <Setter Property="FontWeight" Value="SemiBold"/>
         </DataTrigger>
         <Trigger Property="IsSelected" Value="True">
