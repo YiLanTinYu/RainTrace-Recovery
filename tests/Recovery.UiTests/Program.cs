@@ -89,6 +89,8 @@ internal static class Program
         var exFatDeep = FindRequired<CheckBox>(window, "ExFatDeepMetadataCheck");
         var photoRec = FindRequired<CheckBox>(window, "CarveCheck");
         var lostPartition = FindRequired<CheckBox>(window, "LostPartitionCheck");
+        var modifiedFrom = FindRequired<DatePicker>(window, "ModifiedFromPicker");
+        var modifiedTo = FindRequired<DatePicker>(window, "ModifiedToPicker");
         var scanOptions = FindRequired<FrameworkElement>(window, "ScanOptionsPanel");
         var advanced = FindVisualChildren<Expander>(window)
             .SingleOrDefault(item => item.Header?.ToString()?.Contains("高级设置", StringComparison.Ordinal) == true)
@@ -105,6 +107,9 @@ internal static class Program
         Assert(FindVisualChildren<TextBlock>(window).All(item =>
                    !item.Text.Contains("源介质永久只读", StringComparison.Ordinal)),
             "the removed read-only marketing badge is not rendered in the header");
+        Assert(Math.Abs(modifiedFrom.ActualHeight - 38) < 0.5 && Math.Abs(modifiedTo.ActualHeight - 38) < 0.5 &&
+               modifiedFrom.VerticalAlignment == VerticalAlignment.Bottom && modifiedTo.VerticalAlignment == VerticalAlignment.Bottom,
+            "date range controls use the compact input height and align to the filter-row baseline");
 
         Assert(deleted.IsChecked == true && formatted.IsChecked != true && lost.IsChecked != true,
             "the default layout exposes exactly three scenarios and selects deleted-file recovery");
