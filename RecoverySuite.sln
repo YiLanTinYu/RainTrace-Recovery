@@ -10,6 +10,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Recovery.Tests", "tests\Rec
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Recovery.UiTests", "tests\Recovery.UiTests\Recovery.UiTests.csproj", "{86CBE669-85AA-4B2E-A19D-71D4AC93EC16}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Recovery.Acceptance", "src\Recovery.Acceptance\Recovery.Acceptance.csproj", "{C15D6167-A41C-47B1-9402-3F26F3C457F8}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -32,5 +34,9 @@ Global
 		{86CBE669-85AA-4B2E-A19D-71D4AC93EC16}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{86CBE669-85AA-4B2E-A19D-71D4AC93EC16}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{86CBE669-85AA-4B2E-A19D-71D4AC93EC16}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C15D6167-A41C-47B1-9402-3F26F3C457F8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C15D6167-A41C-47B1-9402-3F26F3C457F8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C15D6167-A41C-47B1-9402-3F26F3C457F8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C15D6167-A41C-47B1-9402-3F26F3C457F8}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

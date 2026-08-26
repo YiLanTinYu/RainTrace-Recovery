@@ -1,3 +1,4 @@
+using Recovery.Acceptance;
 using Recovery.Core;
 using System.Buffers.Binary;
 using System.Security.Cryptography;
@@ -312,6 +313,9 @@ internal static class Program
 
             await TestRecoveryReportsAsync(outputDir);
             lines.Add("PASS batch recovery JSON/CSV reports preserve every status, byte count, hash, failure reason and unique output name");
+
+            await TestAcceptanceToolAsync(outputDir);
+            lines.Add("PASS acceptance tool generates a deterministic mixed file set and classifies original-path, renamed, damaged, missing and extra recovery results");
 
             await TestRecoveryCandidateIndexAsync();
             lines.Add("PASS exact-content deduplication requires full SHA-256 and keeps filesystem metadata as the preferred recovery source");
@@ -931,6 +935,61 @@ internal static class Program
                tolerantQueue.Items.Select(item => item.Status).SequenceEqual([
                    RecoveryItemStatus.Success, RecoveryItemStatus.Failed, RecoveryItemStatus.Success]),
             "mixed recovery queue continues after one damaged file and reports every item accurately");
+    }
+
+    private static async Task TestAcceptanceToolAsync(string outputDir)
+    {
+        var root = Path.Combine(outputDir, "acceptance-tool-" + Guid.NewGuid().ToString("N"));
+        var generated = await AcceptanceCaseService.GenerateAsync(Path.Combine(root, "dataset"));
+        Assert(generated.Manifest.Version == 1 && generated.Manifest.Files.Count == 13 &&
+               generated.Manifest.Files.Select(file => file.Sha256).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 13,
+            "acceptance manifest contains thirteen uniquely hashable fixtures");
+        Assert(File.Exists(generated.ManifestPath) && File.Exists(generated.InstructionsPath),
+            "acceptance manifest and operator instructions exist");
+        foreach (var fixture in generated.Manifest.Files.Where(file => RecoveryCapabilityRegistry.SupportsPreflight(Path.GetExtension(file.RelativePath))))
+        {
+            var fixturePath = Path.Combine(generated.ContentDirectory, fixture.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+            Assert((await FileIntegrityValidator.ValidateAsync(fixturePath)).State == FileIntegrityState.Valid,
+                $"acceptance fixture passes registered preflight: {fixture.RelativePath}");
+        }
+
+        var partialRecovery = Path.Combine(root, "partial-recovery");
+        Directory.CreateDirectory(partialRecovery);
+        var exact = generated.Manifest.Files[0];
+        var renamed = generated.Manifest.Files[1];
+        var damaged = generated.Manifest.Files[2];
+        CopyFixture(generated.ContentDirectory, partialRecovery, exact.RelativePath, exact.RelativePath);
+        CopyFixture(generated.ContentDirectory, partialRecovery, renamed.RelativePath, Path.Combine("临时名称", "recovered-0001" + Path.GetExtension(renamed.RelativePath)));
+        var damagedPath = Path.Combine(partialRecovery, "损坏", Path.GetFileName(damaged.RelativePath));
+        Directory.CreateDirectory(Path.GetDirectoryName(damagedPath)!);
+        await File.WriteAllTextAsync(damagedPath, "damaged acceptance fixture", Encoding.UTF8);
+        await File.WriteAllTextAsync(Path.Combine(partialRecovery, "extra-file.tmp"), "extra", Encoding.UTF8);
+
+        var partial = await AcceptanceCaseService.VerifyAsync(generated.ManifestPath, partialRecovery, Path.Combine(root, "partial-report"));
+        Assert(partial.Report.Summary.Expected == 13 && partial.Report.Summary.ContentRecovered == 2 &&
+               partial.Report.Summary.OriginalPathRecovered == 1 && partial.Report.Summary.OriginalNameRecovered == 1 &&
+               partial.Report.Summary.RenamedRecovered == 1 && partial.Report.Summary.Damaged == 1 &&
+               partial.Report.Summary.Missing == 10 && partial.Report.Summary.Extra == 1,
+            "acceptance verifier classifies partial recovery results");
+        Assert(File.Exists(partial.JsonPath) && File.Exists(partial.CsvPath) && File.Exists(partial.MarkdownPath) &&
+               (await File.ReadAllTextAsync(partial.MarkdownPath, Encoding.UTF8)).Contains("内容完整恢复", StringComparison.Ordinal),
+            "acceptance verifier writes JSON CSV and Markdown reports");
+
+        var completeRecovery = Path.Combine(root, "complete-recovery");
+        foreach (var fixture in generated.Manifest.Files)
+            CopyFixture(generated.ContentDirectory, completeRecovery, fixture.RelativePath, fixture.RelativePath);
+        var complete = await AcceptanceCaseService.VerifyAsync(generated.ManifestPath, completeRecovery, Path.Combine(root, "complete-report"));
+        Assert(complete.Report.Summary.ContentRecovered == 13 && complete.Report.Summary.OriginalPathRecovered == 13 &&
+               complete.Report.Summary.Damaged == 0 && complete.Report.Summary.Missing == 0 && complete.Report.Summary.Extra == 0,
+            "acceptance verifier confirms a complete original-path recovery");
+    }
+
+    private static void CopyFixture(string sourceRoot, string destinationRoot, string sourceRelativePath, string destinationRelativePath)
+    {
+        var source = Path.Combine(sourceRoot, sourceRelativePath.Replace('/', Path.DirectorySeparatorChar));
+        var destination = Path.Combine(destinationRoot, destinationRelativePath.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        File.Copy(source, destination, overwrite: true);
     }
 
     private static async Task TestRecoveryCandidateIndexAsync()

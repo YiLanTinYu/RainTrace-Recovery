@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>雨痕恢复验收工具</AssemblyName>
+    <RootNamespace>Recovery.Acceptance</RootNamespace>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+</Project>

@@ -6,5 +6,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Recovery.Core\Recovery.Core.csproj" />
+    <ProjectReference Include="..\..\src\Recovery.Acceptance\Recovery.Acceptance.csproj" />
   </ItemGroup>
 </Project>
