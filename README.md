@@ -103,3 +103,9 @@ Windows x64 只读数据恢复工具，面向 16 TiB 以下、仍能被 Windows 
 1.6.1 将 exFAT 中同一路径、大小和修改时间的多代删除目录记录合并为一项；不同物理位置的副本仍保留在内存中，恢复时会在主副本结构预检失败后自动尝试备用副本。
 
 1.6.2 完善结果表多选：支持 Ctrl+A 全选当前结果、Shift 连续选择、Ctrl 增减单项；行选择与复选框勾选取并集进行恢复。选中行使用高对比蓝色背景和浅蓝左侧指示条。
+
+## 许可证
+
+雨痕数据恢复的项目自有代码采用 **Apache License 2.0 + Commons Clause License Condition v1.0**，版权所有：**倚栏听雨**。Commons Clause 限制将本软件本身或主要价值来自本软件功能的产品、服务用于收费销售，因此该组合属于源码可用许可证，而不是 OSI 定义的开源许可证。完整条款见 [LICENSE](LICENSE)，版权与第三方组件说明见 [NOTICE](NOTICE)。
+
+`third_party` 目录中的 The Sleuth Kit、TestDisk/PhotoRec 等第三方组件不适用上述项目自有代码许可，仍分别遵循其随附的原许可证。
