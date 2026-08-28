@@ -90,7 +90,7 @@ Windows x64 只读数据恢复工具，面向 16 TiB 以下、仍能被 Windows 
 .\tools\dotnet8\dotnet.exe run --project tests\Recovery.UiTests\Recovery.UiTests.csproj -c Release -p:SmokeTestMode=true
 ```
 
-命令使用仓库固定的稳定版 .NET 8 SDK。集成测试强制要求测试根目录位于 D、E 或 G 盘；代码明确拒绝 C 盘测试根目录。自动回归使用实验目录和合成镜像，不代表已对 D/E/G 的整块实体介质执行删除、格式化或覆盖验收。详见 [技术路线与测试报告](docs/技术路线与测试报告.md) 和 [V1.14.0 发布测试报告](docs/V1.14.0-测试报告-20260825.md)。
+命令使用仓库固定的稳定版 .NET 8 SDK。集成测试强制要求测试根目录位于 D、E 或 G 盘；代码明确拒绝 C 盘测试根目录。自动回归使用实验目录和合成镜像，真实介质测试范围与结果另见 [技术路线与测试报告](docs/技术路线与测试报告.md) 和 [V1.15.3 实盘测试报告](docs/V1.15.3-实盘测试报告-20260826.md)。
 
 ## 与开源恢复引擎的关系
 
