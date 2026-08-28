@@ -437,8 +437,9 @@ internal static class Program
         var countText = FindRequired<TextBlock>(window, "CountText");
         var copyrightText = FindRequired<TextBlock>(window, "CopyrightText");
         Assert(copyrightText.Text == "版权所有：倚栏听雨" && copyrightText.IsVisible &&
-               copyrightText.VerticalAlignment == VerticalAlignment.Bottom,
-            "the owner notice is visible in the footer without competing with primary controls");
+               copyrightText.HorizontalAlignment == HorizontalAlignment.Right &&
+               copyrightText.VerticalAlignment == VerticalAlignment.Center && Grid.GetRow(copyrightText) == 0,
+            "the owner notice is visible at the upper right without splitting scan progress from candidate count");
         Assert(progressBar.ActualHeight >= 12, "scan progress bar has a clearly visible thickness");
         var initialWidth = progressBar.ActualWidth;
         countText.Text = "1,234,567 / 12,345,678 个候选文件";
